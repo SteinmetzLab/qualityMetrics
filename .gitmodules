@@ -1,0 +1,6 @@
+[submodule "noiseCutoff"]
+	path = noiseCutoff
+	url = https://github.com/SteinmetzLab/noiseCutoff
+[submodule "slidingRefractory"]
+	path = slidingRefractory
+	url = https://github.com/SteinmetzLab/slidingRefractory
