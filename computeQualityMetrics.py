@@ -53,3 +53,5 @@ def computeQualityMetrics(spikeTimes, spikeAmps):
     #Now compute whether neuron passes all 3 metrics, return as boolean
     neuron_pass = bool(rp_pass and nc_pass and ma_pass)
 
+    return neuron_pass, rp_pass, nc_pass, ma_pass
+
