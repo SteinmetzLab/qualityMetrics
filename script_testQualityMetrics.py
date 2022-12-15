@@ -32,4 +32,4 @@ st = spikes.times[clusterInd]
 
 neuron_pass, rp_pass, nc_pass, ma_pass = computeQualityMetrics(spikeTimes, spikeAmps)
 
-plotQualityMetrics(spikeTimes,spikeAmps)
+# plotQualityMetrics(spikeTimes,spikeAmps)
