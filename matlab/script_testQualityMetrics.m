@@ -1,14 +1,14 @@
 %% paths
-githubDir = 'C:\Users\Steinmetz Lab User\Documents\GitHub\';
+githubDir = 'C:\Users\Steinmetz Lab User\Documents\GitHub\SteinmetzLab';
 addpath(genpath(fullfile(githubDir, 'npy-matlab')))
+addpath(genpath(fullfile(githubDir, 'qualityMetrics')))
 addpath(genpath(fullfile(githubDir, 'slidingRefractory')))
-addpath(genpath(fullfile(githubDir, 'SteinmetzLab\qualityMetrics')))
 addpath(genpath(fullfile(githubDir, 'noiseCutoff')))
 
 addpath(genpath(fullfile('C:\Users\Steinmetz Lab User\Documents\MATLAB', 'spikes')))
 
 
-%% load
+%% load sample data
 
 allst = readNPY('E:\Hopkins_CortexLab\spike_times.npy'); 
 allamps = readNPY('E:\Hopkins_CortexLab\amplitudes.npy'); 
