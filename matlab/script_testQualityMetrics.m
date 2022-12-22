@@ -33,7 +33,7 @@ plotQualityMetrics(spikeTimes,spikeAmps);
 
 % test computeQualityMetrics_All for the full population of neurons
 %(Note: this can take a few minutes to run)
-spikeClusters = clu;%np.zros(np.shape(spikeTimes))
-% metrics = computeQualityMetrics_All(allst,allamps,spikeClusters);
+spikeClusters = clu;
+metrics = computeQualityMetrics_All(allst,allamps,spikeClusters);
 
 
