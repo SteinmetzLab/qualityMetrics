@@ -26,10 +26,14 @@ spikeAmps = allamps(clu==cidx);
 % test the three main functions of computeQualityMetrics
  
 % test computeQualityMetrics by computing QC for one neuron
-neuron_pass, rp_pass, nc_pass, ma_pass = computeQualityMetrics(spikeTimes, spikeAmps)
+[neuron_pass, rp_pass, nc_pass, ma_pass] = computeQualityMetrics(spikeTimes, spikeAmps);
 
-% test computeQualityMetrics_All for a 'population' of one neuron
-% spikeClusters = np.zeros(np.shape(spikeTimes)) metrics = computeQualityMetrics_All(spikeTimes,spikeAmps,spikeClusters)
-% 
-% #test plotQualityMetrics
-% plotQualityMetrics(spikeTimes,spikeAmps)
+% test plotQualityMetrics for one neuron
+plotQualityMetrics(spikeTimes,spikeAmps);
+
+% test computeQualityMetrics_All for the full population of neurons
+%(Note: this can take a few minutes to run)
+spikeClusters = clu;%np.zros(np.shape(spikeTimes))
+% metrics = computeQualityMetrics_All(allst,allamps,spikeClusters);
+
+
