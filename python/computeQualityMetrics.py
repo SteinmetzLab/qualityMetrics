@@ -9,7 +9,7 @@ from computeNoiseCutoff import *
 from slidingRP.metrics import slidingRP
 import mpl_scatter_density
 
-def computeQualityMetrics(spikeTimes, spikeAmps, medAmpThresh = 50, verbose = True):
+def computeQualityMetrics(spikeTimes, spikeAmps, medAmpThresh = 50, verbose = True, convertSpikeAmps = False):
     '''
 
     This code computes the full set of 3 quality metrics below as used in the IBL and Steinmetz Lab.
@@ -29,6 +29,10 @@ def computeQualityMetrics(spikeTimes, spikeAmps, medAmpThresh = 50, verbose = Tr
 
     '''
     
+    if convertSpikeAmps:
+        # if your spike amplitudes are in units of template scaling factors (KS),
+        # you will need to first convert them into units of uV
+        spikeAmps = convertSpikeAmpsToV(spikeAmps)
 
     if verbose:
         print("Computing metrics...")
@@ -288,4 +292,32 @@ def plotSlidingRP(spikeTimes, params=None, symmetrize=True):
 
 
 
+def convertSpikeAmpsToV(temps, scalingFactors):
 
+    '''
+
+    :param temps:
+    :param scalingFactors:
+    :return:
+    '''
+
+    # unwhiten all the templates
+    tempsUnW = np.zeros_like(temps)
+    for t in range(np.shape(temps)[0])
+    tempsUnW(t,:,:) = squeeze(temps(t,:,:))*winv;
+
+
+end
+
+% The amplitude on each channel is the positive peak minus the negative
+tempChanAmps = squeeze(max(tempsUnW,[],2))-squeeze(min(tempsUnW,[],2));
+
+
+% The template amplitude is the amplitude of its largest channel (but see
+% below for true tempAmps)
+tempAmpsUnscaled = max(tempChanAmps,[],2);
+
+
+% assign all spikes the amplitude of their template multiplied by their
+% scaling amplitudes (templates are zero-indexed)
+spikeAmps = tempAmpsUnscaled(spikeTemplates+1).*tempScalingAmps;
