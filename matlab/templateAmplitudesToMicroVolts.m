@@ -1,5 +1,6 @@
 
-function [spikeAmps, tempAmps, tempsUnW, templateDuration, waveforms] = templateAmplitudesToMicroVolts(temps, winv, ycoords, spikeTemplates, tempScalingAmps)
+function [spikeAmps, tempAmps] = templateAmplitudesToMicroVolts(...
+    temps, winv, spikeTemplates, tempScalingAmps, gain)
 
 % Compute some basic things about spikes and templates
 %
@@ -7,19 +8,14 @@ function [spikeAmps, tempAmps, tempsUnW, templateDuration, waveforms] = template
 % - spikeAmps is length nSpikes vector with amplitude in unwhitened space
 % of every spike
 % - templateAmps is the amplitude of each template
-% - tempsUnW are the unwhitened templates
-% - templateDuration is the trough-to-peak time (in samples)
-% - waveforms: returns the waveform from the max-amplitude channel
 %
 % inputs: 
 % - temps, the templates (nTemplates x nTimePoints x nChannels)
 % - winv, the whitening matrix (nCh x nCh)
-
-
-% - ycoords, the coordinates of the channels (nCh x 1)
 % - spikeTemplates, which template each spike came from (nSpikes x 1)
 % - tempScalingAmps, the amount by which the template was scaled to extract
 % each spike (nSpikes x 1)
+% - gain is a scalar [uV/bit] - should be 2.34 for NP1.0
 
 
 
@@ -28,10 +24,6 @@ tempsUnW = zeros(size(temps));
 for t = 1:size(temps,1)
     tempsUnW(t,:,:) = squeeze(temps(t,:,:))*winv;
 end
-
-% compute the biggest absolute value within each template (obsolete)
-% absTemps = abs(tempsUnW);
-% tempAmps = max(max(absTemps,[],3),[],2);
 
 % The amplitude on each channel is the positive peak minus the negative
 tempChanAmps = squeeze(max(tempsUnW,[],2))-squeeze(min(tempsUnW,[],2));
@@ -44,6 +36,9 @@ tempAmpsUnscaled = max(tempChanAmps,[],2);
 % scaling amplitudes (templates are zero-indexed)
 spikeAmps = tempAmpsUnscaled(spikeTemplates+1).*tempScalingAmps;
 
+%multiply by the gain factor
+spikeAmps = spikeAmps * gain; % gain scaling for NP 1.0, uV/bit
+
 % take the average of all spike amps to get actual template amps (since
 % tempScalingAmps are equal mean for all templates)
 ta = clusterAverage(spikeTemplates+1, spikeAmps);
@@ -51,23 +46,4 @@ tids = unique(spikeTemplates);
 tempAmps(tids+1) = ta; % because ta only has entries for templates that had at least one spike
 tempAmps = tempAmps'; % for consistency, make first dimension template number
 
-%multiply by the gain factor
-tempAmps = tempAmps * 2.34; % gain scaling for NP 1.0, uV/bit
-
-
-
-% Get channel with largest amplitude, take that as the waveform
-[~,max_site] = max(max(abs(temps),[],2),[],3);
-templates_max = nan(size(temps,1),size(temps,2));
-for curr_template = 1:size(temps,1)
-    templates_max(curr_template,:) = ...
-        temps(curr_template,:,max_site(curr_template));
-end
-waveforms = templates_max;
-
-% Get trough-to-peak time for each template
-[~,waveform_trough] = min(templates_max,[],2);
-[~,templateDuration] = arrayfun(@(x) ...
-    max(templates_max(x,waveform_trough(x):end),[],2), ...
-    transpose(1:size(templates_max,1)));
 
