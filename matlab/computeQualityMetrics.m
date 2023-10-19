@@ -1,4 +1,4 @@
-function [neuron_pass, rp_pass, nc_pass, ma_pass] = computeQualityMetrics(spikeTimes, spikeAmps, medAmpThresh, verbose)%, medAmpThresh = 50, verbose = True):
+function [neuron_pass, rp_pass, nc_pass, ma_pass] = computeQualityMetrics(spikeTimes, spikeAmps, medAmpThresh, verbose)
 % 
 %   This code computes the full set of 3 quality metrics below as used in the IBL and Steinmetz Lab.
 %   Metrics:
