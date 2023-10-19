@@ -20,3 +20,24 @@ allst = double(spikeTimes_samps)/30000;
 cids = unique(clu);
 
 
+%% run Sliding RP with spike times
+
+
+%% run noise cutoff after re-scaling amplitudes
+
+
+%% load raw mean waveforms to get true amplitude in uV of each cluster
+
+
+%% combine metrics into table
+
+% table columns: 
+% - clusterID
+% - rp_pass (whether RP test passes)
+% - rp_minContamination (at 90% confidence)
+% - rp_maxConfidence (at 10% contamination)
+% - rp_rpTime (time of min Contamination)
+% - nc_pass (whether noise cutoff passes)
+% - nc_value (test statistic)
+% - amp_pass (whether amp > 50 uV)
+% - amp_value (median peak-peak amplitude of the unit in uV)
