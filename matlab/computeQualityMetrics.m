@@ -29,7 +29,7 @@ end
         nSpikesBelow2, confMatrix, cont, rp, nACG, firingRate] ...
         = slidingRP(spikeTimes, params);
 
-    % Also compute whether RP pass: #TODO: add nSpikesBelow2 condition
+    % Also compute whether RP pass:
     if minContWith90Confidence < 10
         rp_pass = true;
     else
