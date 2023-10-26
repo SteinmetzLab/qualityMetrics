@@ -1,12 +1,12 @@
 %% paths
-githubDir = 'C:\Users\noamroth\Documents\GitHub';
+% githubDir = 'C:\Users\noamroth\Documents\GitHub';
 
 addpath(genpath(fullfile(githubDir, 'npy-matlab'))) % https://github.com/kwikteam/npy-matlab
 addpath(genpath(fullfile(githubDir, 'qualityMetrics'))) % https://github.com/SteinmetzLab/qualityMetrics
 addpath(genpath(fullfile(githubDir, 'spikes'))) % https://github.com/cortex-lab/spikes
 
 
-dataRoot = 'E:\Hopkins_CortexLab\';
+dataRoot = 'D:\Hopkins\test\data.cortexlab.net\singlePhase3\data\Hopkins2016-07-22_metrics\ks1_out';
 
 %% load sample data
 
@@ -59,27 +59,17 @@ gwfparams.spikeClusters = clu; % Vector of cluster IDs (Phy nomenclature)   same
 
 wf = getWaveForms(gwfparams);
 
-% compute median amplitude across waveform samples
+%% compute median amplitude across waveform samples
 wfs = wf.waveForms; 
 wfs = wfs-nanmean(nanmean(nanmean(wfs,1),2), 4); %subtract mean across units and waveforms and time points (mean activity per channel)
 wfs = wfs-nanmedian(wfs,3); %subtract the activity of the unit, waveform, timepoint 
-wfsMean = squeeze(nanmean(wfs,2)); % mean across waveforms to compute max channel
-wfAmpsPerChan = squeeze(nanmax(wfsMean,[],3))-squeeze(nanmin(wfsMean,[],3)); %peak to peak amplitude per channel
-[~,maxChan] = nanmax(wfAmpsPerChan,[],2); %indices of max channel for each unit
-
-%for each unit, take all of its waveforms only on its max channel 
-for i = 1:size(wfs,1)
-    wfMaxChan(i,:,:) = squeeze(wfs(i,:,maxChan(i),:)); 
-end
-
-% compute peak-to-peak amplitude for each sample waveform 
-wfAmpMaxChan = squeeze(nanmax(wfMaxChan,[],3))-squeeze(nanmin(wfMaxChan,[],3)); 
+wfsMedian = squeeze(nanmedian(wfs,2)); % mean across waveforms to compute max channel
+wfAmpsPerChan = squeeze(nanmax(wfsMedian,[],3))-squeeze(nanmin(wfsMedian,[],3)); %peak to peak amplitude per channel
+wfAmpMaxChan = nanmax(wfAmpsPerChan,[],2); %values at max channel for each unit
 
 %multiply by gain factor: 2.34 for NP 1.0:
-wfAmp = wfAmpMaxChan * gain; 
+amp_value = wfAmpMaxChan * gain; 
 
-% median amplitude across sample waveforms for each unit
-amp_value = nanmedian(wfAmp,2);
 amp_pass = amp_value > amp_thresh; 
 
 % append these to a struct (to combine all 3 metrics into a table below)
