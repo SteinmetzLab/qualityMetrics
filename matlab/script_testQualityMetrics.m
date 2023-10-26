@@ -63,13 +63,14 @@ wf = getWaveForms(gwfparams);
 wfs = wf.waveForms; 
 wfs = wfs-nanmean(nanmean(nanmean(wfs,1),2), 4); %subtract mean across units and waveforms and time points (mean activity per channel)
 wfs = wfs-nanmedian(wfs,3); %subtract the activity of the unit, waveform, timepoint 
-wfsMedian = squeeze(nanmedian(wfs,2)); % mean across waveforms to compute max channel
+wfsMedian = squeeze(nanmedian(wfs,2)); % median across waveforms 
 wfAmpsPerChan = squeeze(nanmax(wfsMedian,[],3))-squeeze(nanmin(wfsMedian,[],3)); %peak to peak amplitude per channel
 wfAmpMaxChan = nanmax(wfAmpsPerChan,[],2); %values at max channel for each unit
 
 %multiply by gain factor: 2.34 for NP 1.0:
-amp_value = wfAmpMaxChan * gain; 
+amp_value = wfAmpMaxChan * gain;
 
+%check whether the median amplitude passes the amplitude threshold
 amp_pass = amp_value > amp_thresh; 
 
 % append these to a struct (to combine all 3 metrics into a table below)
