@@ -75,8 +75,11 @@ end
 % compute peak-to-peak amplitude for each sample waveform 
 wfAmpMaxChan = squeeze(nanmax(wfMaxChan,[],3))-squeeze(nanmin(wfMaxChan,[],3)); 
 
+%multiply by gain factor: 2.34 for NP 1.0:
+wfAmp = wfAmpMaxChan * 2.34; 
+
 % median amplitude across sample waveforms for each unit
-amp_value = nanmedian(wfAmpMaxChan,2);
+amp_value = nanmedian(wfAmp,2);
 amp_pass = amp_value > 50; %median amplitude threshold is 50 uV
 
 % append these to a struct (to combine all 3 metrics into a table below)
