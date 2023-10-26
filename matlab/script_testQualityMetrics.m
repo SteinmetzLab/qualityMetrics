@@ -44,8 +44,8 @@ noiseCutoffStruct = run_noiseCutoff_All(rescAmps,clu,verbose,params);
 % then compute median amplitude across sample waveforms
 
 gain = 2.34; % 2.34 uV/bit for NP 1.0, 0.76 uV/bit for NP 2.0
-
 nWF = 25; % number of waveforms to load for each cluster
+amp_thresh = 50; % median amplitude threshold is 50 uV
 
 gwfparams.dataDir = dataRoot;    % KiloSort/Phy output folder
 d = dir(fullfile(dataRoot, '*.ap*bin')); 
@@ -76,11 +76,11 @@ end
 wfAmpMaxChan = squeeze(nanmax(wfMaxChan,[],3))-squeeze(nanmin(wfMaxChan,[],3)); 
 
 %multiply by gain factor: 2.34 for NP 1.0:
-wfAmp = wfAmpMaxChan * 2.34; 
+wfAmp = wfAmpMaxChan * gain; 
 
 % median amplitude across sample waveforms for each unit
 amp_value = nanmedian(wfAmp,2);
-amp_pass = amp_value > 50; %median amplitude threshold is 50 uV
+amp_pass = amp_value > amp_thresh; 
 
 % append these to a struct (to combine all 3 metrics into a table below)
 medianAmpStruct.amp_pass = amp_pass;
