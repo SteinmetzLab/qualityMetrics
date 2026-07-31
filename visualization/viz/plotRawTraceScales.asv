@@ -1,0 +1,115 @@
+function figs = plotRawTraceScales(rec, t0, varargin)
+% plotRawTraceScales  Raw-trace waterfalls across several timescales.
+%
+%   figs = plotRawTraceScales(rec, t0, Name, Value, ...)
+%
+% Renders a stacked trace figure for the given recording on a window of 40 ms 
+% as a multi-scale overview of spiking activity. Plots 32 channels. 
+% Optionally saves each figure as its own image.
+%
+% INPUTS
+%   rec (struct)    = recording file from loadRawRecording
+%   t0  (double)    = window start in seconds
+%
+% NAME-VALUE OPTIONS
+%   'Timescales'   window durations in seconds   (default [0.01 0.1 0.4 1 10])
+%   'StartChannel' first channel of the span     (default 1)
+%   'NumChannels'  channels in the span          (default 32)
+%   'HighpassHz'   high-pass cutoff, 0 to disable(default 300)
+%   'CMR'          common median reference       (default true)
+%   'SpacingUV'    µV between channels, [] = auto(default [])
+%   'ScaleBarUV'   scale-bar length              (default 200)
+%   'TitleTag'     title prefix (e.g. 'probe00a')(default '')
+%   'Save'         save each figure to an image  (default false)
+%   'SaveDir'      output folder                 (default pwd)
+%   'FilePrefix'   filename prefix               (default 'rawtrace')
+%   'Format'       image format for saving       (default 'png')
+%   'Resolution'   dpi when saving               (default 200)
+%
+% OUTPUT
+%   figs   array of figure handles, one per timescale.
+
+p = inputParser;
+p.addParameter('allTimescales', false, @islogical);
+p.addParameter('recordingType', 'ap', @ischar);
+p.addParameter('StartChannel', 1);
+p.addParameter('NumChannels', 32);
+p.addParameter('HighpassHz', 300);
+p.addParameter('CMR', true);
+p.addParameter('SpacingUV', []);
+p.addParameter('ScaleBarUV', 200);
+p.addParameter('TitleTag', '');
+p.addParameter('SaveToggle', false);
+p.addParameter('SaveDir', pwd);
+p.addParameter('FilePrefix', 'rawtrace');
+p.addParameter('Resolution', 200);
+p.addParameter('z_max', 4850, @isnumeric);   % mask channels with depth > z_max (top artifact band); Inf to disable
+p.addParameter('ksdir', 'C:\spikesort_scratch\probe00a_full_ks4', @ischar);
+p.parse(varargin{:});
+o = p.Results;
+
+if nargin < 2 || isempty(t0)
+    t0 = rec.duration / 2;
+end
+
+% load channel geometry
+
+chanpos = readNPY(fullfile(o.ksdir, 'channel_positions.npy'));   % (nChan,2) [x z]
+z = double(chanpos(:,2));
+keepChan = z <= o.z_max;               % exclude the top artifact band (z > z_max)
+idxKeep  = find(keepChan);             % channel indices (1-based) we display/plot
+[zsorted, ord] = sort(z(idxKeep));     % ascending depth among kept channels
+order = idxKeep(ord);                  % display-row -> channel index (1-based)
+
+% ready channels
+
+c0 = max(1, round(o.StartChannel));
+c1 = min(rec.nChannels, c0 + round(o.NumChannels) - 1);
+channels = order(c0:c1);
+
+timescales = 0.04;
+
+if o.allTimescales
+    timescales = [0.01 0.1 0.04 1 10];
+end
+
+% ---- guard against running off the end of the recording ----------------
+
+maxDur = max(timescales);
+if t0 + maxDur > rec.duration
+    t0 = max(0, rec.duration - maxDur);
+    warning('plotRawTraceScales:clamp', ...
+        'Window would exceed recording; moved t0 to %.3f s.', t0);
+end
+
+if o.SaveToggle && ~isfolder(o.SaveDir)
+    mkdir(o.SaveDir);
+end
+
+figs = gobjects(1, numel(timescales));
+for k = 1:numel(timescales)
+    figs(k) = plotWaterfall(rec, t0, timescales(k), channels, ...
+        'HighpassHz', o.HighpassHz, 'CMR', o.CMR, ...
+        'SpacingUV', o.SpacingUV, 'ScaleBarUV', o.ScaleBarUV, ...
+        'TitleTag', o.TitleTag);
+
+    if o.SaveToggle
+        fname = sprintf('%s_%s_t%08.3fs_ch%d-%d.%s', ...
+            o.FilePrefix, durTag(timescales(k)), t0, channels(1), channels(end), 'png');
+        outfile = fullfile(o.SaveDir, fname);
+        exportgraphics(figs(k), outfile, 'Resolution', o.Resolution);
+        fprintf('saved %s\n', outfile);
+    end
+end
+end
+
+% ----------------------------------------------------------------------
+function s = durTag(dur)
+% Compact filename-safe timescale tag: 0.01 -> '10ms', 10 -> '10s'.
+if dur < 1
+    s = sprintf('%gms', dur*1000);
+else
+    s = sprintf('%gs', dur);
+end
+s = regexprep(s, '\.', 'p');
+end

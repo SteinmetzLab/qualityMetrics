@@ -1,0 +1,88 @@
+function sampleWf = plotSampleWaveforms(datPath, nChan, times, pre, post, showCh, axList, t_ms, gain_uV, varargin)
+% plotSampleWaveforms  Overlay individual waveforms per channel.
+%
+% INPUTS
+%   datPath   int16 [nChan x nSamp] recording file (ksResults.recordingPath)
+%   nChan     # channels in the file
+%   times     spike sample indices for THIS cluster (already in-bounds is fine;
+%             out-of-bounds snippets are dropped defensively)
+%   pre,post  samples before/after trough  (nT-1 = pre+post)
+%   showCh    1-based channel indices to draw, in the SAME order as axList
+%   axList    array of axes handles, one per entry of showCh (e.g. collected
+%             from nexttile). If [], the current axes (gca) is used for all.
+%   t_ms      time vector [1 x nT] in ms (0 = trough), from plotWaveform
+%   gain_uV   int16 -> microvolts scale (default in plotWaveform 3.02734375)
+%
+% NAME/VALUE
+%   'nSample'   max # single spikes to draw       (default 50)
+%   'seed'      RNG seed for the random subsample  (default 0)
+%   'color'     RGB line color                      (default [0.6 0.6 0.6])
+%   'alpha'     line opacity 0..1                   (default 0.25)
+%   'LineWidth' line width                          (default 0.5)
+%
+% OUTPUT
+%   sampleWf   [nT x nChan x nDrawn] the raw snippets used (uV), so the caller
+%              can reuse them (e.g. amplitude histograms) without re-reading.
+
+    %% input parser
+    
+    p = inputParser;
+    p.addParameter('nSample',   50,               @(x)isnumeric(x)&&isscalar(x));
+    p.addParameter('seed',      0,                @isnumeric);
+    p.parse(varargin{:});
+    o = p.Results;
+
+    %% plot params
+
+    traceColor      = [0.6 0.6 0.6];
+    traceAlpha      = 0.25;
+    traceLineWidth  = 0.5;
+    
+    %% pick and pull spikes
+
+    nT = pre + post + 1;
+    
+    nSamp = fileSamples(datPath, nChan);
+    times = times(times>pre & times<=nSamp-post);       % keep fully-inside snippets
+    assert(~isempty(times), 'no in-bounds spikes to sample');
+    
+    rng(o.seed);
+    nDraw = min(o.nSample, numel(times));
+    sel   = times(randperm(numel(times), nDraw));
+    
+    map = memmapfile(datPath, 'Format', {'int16',[nChan nSamp],'x'}, 'Offset', 0);
+    sampleWf = zeros(nT, nChan, nDraw);
+    for k = 1:nDraw
+        s = sel(k);
+        snip = double(map.Data.x(:, (s-pre):(s+post))).';       % [nT x nChan]
+        snip = snip - mean(snip(1:min(15,nT), :), 1);           % baseline subtract
+        sampleWf(:,:,k) = snip * gain_uV;                        % -> microvolts
+    end
+    clear map
+    
+    %% draw spikes
+
+    lineColor = [traceColor(:).' min(max(traceAlpha,0),1)];           % RGBA
+    useGca = isempty(axList);
+    for i = 1:numel(showCh)
+        ci = showCh(i);
+        if useGca
+            ax = gca;
+        else
+            ax = axList(i);
+        end
+        hold(ax,'on');
+        % single call per channel: NaN-separate the snippets into one line object
+        T = [repmat(t_ms(:), 1, nDraw); nan(1, nDraw)];         % [(nT+1) x nDraw]
+        Y = [squeeze(sampleWf(:,ci,:)); nan(1, nDraw)];
+        plot(ax, T(:), Y(:), '-', 'Color', lineColor, 'LineWidth', traceLineWidth);
+    end
+end
+
+% ---- helper: number of time samples in an int16 [nChan x nSamp] file ------
+
+function n = fileSamples(datPath, nChan)
+    d = dir(datPath);
+    n = d.bytes / (2*nChan);
+    assert(n==floor(n), 'file size not divisible by 2*%d channels', nChan);
+end
