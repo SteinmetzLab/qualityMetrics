@@ -63,30 +63,29 @@ channel = 0;    % where the channel window is at
 close all    % start clean so qcSavePDF collects only this section's figures
 
 % raw traces
-[apTracePlot, apPlotChan]     = plotRawTraces(apRec, ksr, 'ap', artifact_z, t0,'StartChannel',33,'SaveToggle',false);
+[apTracePlot, apPlotChan]     = plotRawTraces(apRec, ksr, 'ap', artifact_z, t0,'StartChannel',33,'SaveToggle', false);
 
 % heatmap traces
 heatMapTest = wallHeatmap(apRec, 'SaveToggle', false);
 
 % RMS over time 
-% turned off for testing 260729
-plotBandRMS(apRec,lfpRec,'Band','both', 'SaveToggle', true); 
-
+plotBandRMS(apRec, lfpRec, 'Band', 'both', 'SaveToggle', false); 
 
 % power spectra
+plotDepthPower(apRec, 'ap', 'SaveToggle', false);
 
 % collate AP section figures into one PDF
 qcSavePDF('ap');
 
 %% raw LFP QC
 
-close all    % start clean so qcSavePDF collects only this section's figures
+close all    
 
 % raw channel traces
 [lfpTracePlot, lfpPlotChan]     = plotRawTraces(lfpRec, ksr, 'lfp', artifact_z, t0, 'manualTimescales', [0.04 0.1 1 10 100], 'StartChannel', 33, 'SaveToggle', false);
 
 % channel vs freq vs power
-plotDepthPower(lfpRec, 'SaveToggle', false);
+plotDepthPower(lfpRec, 'lfp', 'SaveToggle', false);
 
 % collate LFP section figures into one PDF
 qcSavePDF('lfp');
@@ -128,20 +127,8 @@ qcSavePDF('postks');
 
 % columns: cluster_id, KSLabel
 isGoodClu   = strcmp(ksr.lbl.KSLabel, 'good');           % logical per cluster row
-goodIds     = ksr.lbl.cluster_id(isGoodClu);             % 0-based cluster ids, 260730 need to add +1 when indexing in matlab
+goodIds     = ksr.lbl.cluster_id(isGoodClu);             % 0-based cluster ids
 muaIds      = ksr.lbl.cluster_id(~isGoodClu);
-
-% 260730 figuring out parsing error
-% python is 0-index which is what KS labels from
-% matlab 1-index
-
-% so it seems unit 375 which is a good unit is index 376 on KSLabel
-% unit 377 is index 378 (good on ksLabel, but plotted wrong (probably used
-% index 377 from KSLabel)
-% so all units are +1 in KSLabel
-
-% this is bc when selecting units i return the cluster unit and then
-% convert back to an index? 
 
 %% pick cluster (ripped from plotTemplateVsRaw), used for testing
 
