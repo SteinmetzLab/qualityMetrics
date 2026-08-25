@@ -202,16 +202,28 @@ def band_rms(rec, lf_rec=None, n_time_bins: int = 60, win_s: float = 0.25,
             image.append(column)
         image = np.array(image).T                    # (depth bins, time bins)
 
+        # Robust at BOTH ends. Anchoring vmin at zero wastes the whole colour
+        # range on the baseline: this shank sits at 23 uV RMS and varies by a
+        # couple of uV, so 0-to-max renders as a flat yellow field. And a single
+        # artifact column can survive a 99th percentile when the image is only
+        # 60 columns wide, which then compresses everything else into the floor.
         finite = image[np.isfinite(image)]
-        vmax = np.percentile(finite, 99) if finite.size else 1.0
+        vmin, vmax = (np.percentile(finite, [2, 98]) if finite.size else (0, 1))
         im = ax.imshow(image, aspect="auto", origin="lower", cmap="viridis",
-                       vmin=0, vmax=vmax,
+                       vmin=vmin, vmax=vmax,
                        extent=[times[0], times[-1] + win_s,
                                edges[0], edges[-1]])
         cbar = fig.colorbar(im, ax=ax, pad=0.02)
         cbar.set_label("RMS voltage (µV)")
         ax.set_ylabel(DEPTH_LABEL)
-        ax.set_title(f"{name} ({len(times)} windows of {win_s * 1000:.0f} ms)")
+        # No common reference here, deliberately: this figure is a measure of
+        # what is actually on each channel, and referencing would remove exactly
+        # the array-wide fluctuations it is useful for seeing. Said in the title
+        # because coherent vertical stripes look physiological and usually are
+        # not.
+        detail = (f"high-passed at {hp:.0f} Hz" if hp else "as stored")
+        ax.set_title(f"{name}: {len(times)} windows of {win_s * 1000:.0f} ms, "
+                     f"{detail}, no common reference")
         despine(ax)
     axes[-1].set_xlabel(TIME_LABEL)
 
