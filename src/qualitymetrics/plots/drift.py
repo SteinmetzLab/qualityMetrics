@@ -168,6 +168,7 @@ def amplitude_cdf_over_depth(ks, depth_bin_um: float = 40.0,
     sorting.
     """
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
     use_lab_style()
 
     z = ks.spike_depths_um
@@ -188,16 +189,41 @@ def amplitude_cdf_over_depth(ks, depth_bin_um: float = 40.0,
     fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
     extent = [amp_edges[0], amp_edges[-1], depth_edges[0], depth_edges[-1]]
 
+    # Empty bins get their own colour, off the end of the scale. At high
+    # amplitudes a handful of spikes is all there is, and that handful is the
+    # interesting part; on a continuous scale anchored at zero it is
+    # indistinguishable from a bin where nothing happened. Masking the true
+    # zeros to grey makes "rare" and "never" different things to look at.
+    empty_color = "0.75"
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad(empty_color)
+
+    # Log colour scale for the same reason: one spike and a thousand differ by
+    # three orders of magnitude, and a linear scale spends the whole palette on
+    # the densest bins.
     for ax, data, name in ((axes[0], rate, "Rate in bin (spikes/s)"),
-                           (axes[1], survival, "Rate above amplitude (spikes/s)")):
-        finite = data[data > 0]
-        vmax = np.percentile(finite, 99) if finite.size else 1.0
-        im = ax.imshow(data, aspect="auto", origin="lower", extent=extent,
-                       cmap="viridis", vmin=0, vmax=vmax)
+                           (axes[1], survival,
+                            "Rate above amplitude (spikes/s)")):
+        shown = np.ma.masked_where(data <= 0, data)
+        positive = data[data > 0]
+        if positive.size:
+            norm = LogNorm(vmin=positive.min(),
+                           vmax=max(np.percentile(positive, 99.5),
+                                    positive.min() * 10))
+        else:
+            norm = None
+        im = ax.imshow(shown, aspect="auto", origin="lower", extent=extent,
+                       cmap=cmap, norm=norm, interpolation="nearest")
         ax.set_xlabel("Spike amplitude (µV)")
         despine(ax)
-        cbar = fig.colorbar(im, ax=ax, pad=0.02)
+        cbar = fig.colorbar(im, ax=ax, pad=0.02, extend="min")
         cbar.set_label(name)
+        # Name the grey rather than leaving the reader to infer it.
+        cbar.ax.plot([0.5], [-0.04], marker="s", markersize=9,
+                     color=empty_color, markeredgecolor="0.4",
+                     transform=cbar.ax.transAxes, clip_on=False)
+        cbar.ax.text(2.2, -0.04, "No spikes", transform=cbar.ax.transAxes,
+                     va="center", ha="left", fontsize=8)
     axes[0].set_ylabel(DEPTH_LABEL)
     axes[0].set_title("Amplitude distribution")
     axes[1].set_title("Cumulative from high amplitude")

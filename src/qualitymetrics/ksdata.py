@@ -307,6 +307,129 @@ class KilosortResults:
         qm = self.quality_metrics
         return {int(u["unit_id"]): u for u in qm.get("units", [])}
 
+    @cached_property
+    def qc_pass(self) -> dict[int, bool]:
+        """Did each unit pass quality control?
+
+        Prefers our own gate from quality_metrics.json, which combines rate,
+        amplitude and the sliding refractory test. Falls back to Kilosort's own
+        good/mua call when that file is not present, because a figure that
+        cannot distinguish good units at all is worse than one using a weaker
+        criterion. Check :attr:`qc_source` to see which was used, and say so in
+        any figure that encodes it.
+        """
+        stored = self.metrics_by_unit()
+        if stored:
+            return {u: bool(v.get("pass_rescued", v.get("pass_strict", False)))
+                    for u, v in stored.items()}
+        return {u: lab.lower() == "good" for u, lab in self.ks_label.items()}
+
+    @property
+    def qc_source(self) -> str:
+        """Which criterion :attr:`qc_pass` came from, for a figure legend."""
+        return ("our QC" if self.metrics_by_unit()
+                else "Kilosort label" if self.ks_label else "none")
+
+    def autocorrelogram(self, unit_id: int, window_ms: float = 50.0,
+                        bin_ms: float = 0.5):
+        """Spike autocorrelogram for one unit, as (lags_ms, counts).
+
+        The zero-lag bin is removed, since every spike correlates with itself
+        and leaving it in produces a spike at zero that hides the refractory
+        dip, which is the entire thing this plot is for.
+
+        Counts, not a rate: the absolute height is not comparable between units
+        anyway, and normalising invites reading it as a probability.
+        """
+        times = np.sort(self.spike_times_s[self.spike_clusters == unit_id])
+        if times.size < 2:
+            return np.zeros(0), np.zeros(0)
+        window_s = window_ms / 1000.0
+        edges = np.arange(-window_s, window_s + bin_ms / 1000.0,
+                          bin_ms / 1000.0)
+
+        # Differences by rank offset rather than per spike. times[j:] -
+        # times[:-j] is every pair j apart in the sorted order, computed in one
+        # vectorised subtraction. Because the times are sorted, those gaps only
+        # grow with j, so the first offset with nothing inside the window ends
+        # the loop: no pair further apart in rank can be closer in time. That
+        # keeps this linear in the number of pairs actually inside the window,
+        # rather than quadratic in spike count, which matters at a million
+        # spikes.
+        diffs = []
+        j = 1
+        while j < times.size:
+            d = times[j:] - times[:-j]
+            keep = d <= window_s
+            if not keep.any():
+                break
+            diffs.append(d[keep])
+            j += 1
+
+        centres = (edges[:-1] + edges[1:]) / 2 * 1000.0
+        if not diffs:
+            return centres, np.zeros(len(edges) - 1)
+        positive = np.concatenate(diffs)
+        positive = positive[positive > 0]        # drop exact coincidences
+        # The autocorrelogram is symmetric by construction, so each pair is
+        # counted once at +lag and once at -lag.
+        counts, _ = np.histogram(np.concatenate([positive, -positive]),
+                                 bins=edges)
+        return centres, counts
+
+    def qc_summary(self, unit_id: int) -> list[str]:
+        """Short lines describing one unit, for annotating a figure.
+
+        Reads what is available rather than assuming: a sort done before the
+        pipeline recorded contamination simply shows fewer lines.
+        """
+        stored = self.metrics_by_unit().get(int(unit_id), {})
+        lines = []
+        amp = self.unit_amplitude_uv.get(int(unit_id)) if self.uv_per_bit else None
+        if amp is not None:
+            lines.append(f"Amplitude {amp:.0f} µV")
+        n = self.n_spikes.get(int(unit_id))
+        if n is not None:
+            lines.append(f"{n:,} spikes")
+        if stored.get("firing_rate_hz") is not None:
+            lines.append(f"{stored['firing_rate_hz']:.2f} spikes/s")
+        cont = stored.get("sliding_rp_contamination")
+        if cont is not None:
+            lines.append("Contamination "
+                         + ("> 35% (censored)" if not np.isfinite(cont)
+                            else f"{cont:.1f}%"))
+        if stored.get("noise_cutoff") is not None \
+                and np.isfinite(stored["noise_cutoff"]):
+            lines.append(f"Noise cutoff {stored['noise_cutoff']:.2f}")
+        ttp = self.trough_to_peak_ms.get(int(unit_id))
+        if ttp is not None and np.isfinite(ttp):
+            lines.append(f"Trough to peak {ttp:.2f} ms")
+        passed = self.qc_pass.get(int(unit_id))
+        if passed is not None:
+            lines.append(f"QC {'pass' if passed else 'fail'} ({self.qc_source})")
+        return lines
+
+    def units_at_amplitude_percentiles(self, percentiles=(95, 75, 50)
+                                       ) -> list[int]:
+        """The units sitting at given percentiles of the amplitude distribution.
+
+        Picking by percentile rather than by rank gives examples that represent
+        the recording. The single largest unit is usually atypical, which is why
+        95 is a better "big unit" than the maximum.
+        """
+        amps = self.unit_amplitude_uv
+        if not amps:
+            return []
+        ids = np.array(sorted(amps))
+        values = np.array([amps[int(u)] for u in ids])
+        order = np.argsort(values)
+        out = []
+        for pct in percentiles:
+            idx = int(np.clip(round(pct / 100.0 * (len(order) - 1)),
+                              0, len(order) - 1))
+            out.append(int(ids[order[idx]]))
+        return out
+
     # -- provenance --------------------------------------------------------
 
     def title(self, suffix: str = "") -> str:

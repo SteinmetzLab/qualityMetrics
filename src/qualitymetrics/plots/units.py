@@ -9,28 +9,13 @@ import numpy as np
 
 from ..style import AMP_LABEL, DEPTH_LABEL, despine, size_legend, use_lab_style
 
-
-def _spike_count_sizes(counts: np.ndarray, lo: float = 8.0, hi: float = 160.0):
-    """Map spike counts to marker areas on a log scale, plus a legend key.
-
-    Returns (sizes, legend_sizes, legend_labels). The legend is the point: the
-    MATLAB version scaled markers by spike count and never said so, leaving the
-    most visually salient variable in the figure undecodable.
-    """
-    counts = np.asarray(counts, dtype=float)
-    safe = np.clip(counts, 1, None)
-    logs = np.log10(safe)
-    lo_l, hi_l = logs.min(), logs.max()
-    if hi_l <= lo_l:
-        sizes = np.full(counts.shape, (lo + hi) / 2)
-        return sizes, [(lo + hi) / 2], [f"{int(safe[0]):,}"]
-    sizes = lo + (logs - lo_l) / (hi_l - lo_l) * (hi - lo)
-
-    ticks = [10 ** np.ceil(lo_l), 10 ** np.floor((lo_l + hi_l) / 2),
-             10 ** np.floor(hi_l)]
-    ticks = sorted({int(t) for t in ticks if lo_l <= np.log10(t) <= hi_l})
-    key = [lo + (np.log10(t) - lo_l) / (hi_l - lo_l) * (hi - lo) for t in ticks]
-    return sizes, key, [f"{t:,}" for t in ticks]
+#: Marker areas for a unit that passed quality control and one that did not.
+#: Binary, following the MATLAB original, which used 50 and 10. Size encoding a
+#: continuous quantity here would be wasted: colour already carries firing rate
+#: and waveform duration, and what a reader needs from the third channel is the
+#: one bit that says whether to trust the unit at all.
+QC_PASS_SIZE = 55.0
+QC_FAIL_SIZE = 11.0
 
 
 def amp_depth_scatter(ks, duration_s: float | None = None,
@@ -42,8 +27,10 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
     orders of magnitude. Panel B colours by trough-to-peak duration, the classic
     narrow versus broad spiking split.
 
-    Marker area encodes spike count, and unlike the original there is a legend
-    that says so.
+    Marker size is binary: large for a unit that passed quality control, small
+    for one that did not. The legend says which criterion was used, since it is
+    our own gate when quality_metrics.json is present and Kilosort's good/mua
+    label otherwise, and those are not the same question.
     """
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
@@ -52,12 +39,13 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
     uids = [int(u) for u in ks.unit_ids]
     amp = np.array([ks.unit_amplitude_uv[u] for u in uids])
     depth = np.array([ks.unit_depth_um[u] for u in uids])
-    counts = np.array([ks.n_spikes[u] for u in uids], dtype=float)
     rate = np.array([v for v in
                      (ks.firing_rate(duration_s)[u] for u in uids)])
     ttp = np.array([ks.trough_to_peak_ms.get(u, np.nan) for u in uids])
 
-    sizes, key_sizes, key_labels = _spike_count_sizes(counts)
+    passed = np.array([bool(ks.qc_pass.get(u, False)) for u in uids])
+    sizes = np.where(passed, QC_PASS_SIZE, QC_FAIL_SIZE)
+    n_pass = int(passed.sum())
 
     fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
 
@@ -90,10 +78,13 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
                 ax.axhspan(artifact_z_um, top, color="0.88", zorder=0)
                 ax.axhline(artifact_z_um, color="0.45", lw=0.8, ls="--")
     axes[0].set_ylabel(DEPTH_LABEL)
-    size_legend(axes[0], key_sizes, key_labels, "Spikes", loc="lower right")
+    size_legend(axes[0], [QC_PASS_SIZE, QC_FAIL_SIZE],
+                [f"Pass ({n_pass})", f"Fail ({len(uids) - n_pass})"],
+                f"QC, by {ks.qc_source}", loc="lower right")
 
     fig.suptitle(title or ks.title(f"Unit amplitude against depth "
-                                   f"({len(uids)} units)"), fontsize=12)
+                                   f"({len(uids)} units, {n_pass} passing QC)"),
+                 fontsize=12)
     fig.tight_layout()
     return fig
 

@@ -47,52 +47,76 @@ def _filtered_window(rec, t_start_s, win_ms, highpass_hz, cmr, channels):
     return full[:, np.asarray(channels, dtype=int)]
 
 
-def wall_heatmap(rec, t_start_s: float = 100.0, win_ms: float = 25.0,
+def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
                  highpass_hz: float | None = 300.0, cmr: bool = True,
                  clim_uv: float | None = None, clim_pct: float = 99.5,
                  artifact_z_um: float | None = None, title: str | None = None,
-                 figsize=(13, 8)):
-    """Voltage across the whole shank for a short window: the "wall" view.
+                 figsize=(15, 8)):
+    """Voltage across the whole shank at three moments in the session.
 
     Depth on y, time on x, voltage as a diverging colour centred on zero, so a
     spike is a dark spot and a bad channel is a stripe. This is the fastest way
     to see dead channels, a saturating amplifier, or line noise, and it is the
     figure to look at before trusting anything downstream.
+
+    Three windows by default, early, middle and late, because one window says
+    nothing about whether a problem was there the whole time. A dead channel is
+    dead in all three; an artifact that appears only in the last panel is a
+    different problem with a different cause.
+
+    All panels share one colour scale, computed from the three together. Letting
+    each autoscale would make them individually prettier and mutually
+    incomparable, which defeats the point of showing three.
     """
     import matplotlib.pyplot as plt
     use_lab_style()
 
     order, depths = _depth_order(rec)
-    t1 = t_start_s + win_ms / 1000.0
-    traces = rec.get_traces(t_start_s, t1, channels=order)
-    if highpass_hz:
-        traces = preprocess_ap(traces, rec.fs, highpass_hz, cmr=cmr)
+    if t_starts_s is None:
+        # 10%, 50% and 90% through, so the first window clears any settling
+        # transient and the last is not truncated by the end of the file.
+        span = max(rec.duration_s - win_ms / 1000.0, 0.0)
+        t_starts_s = [span * f for f in (0.10, 0.50, 0.90)]
+    elif np.isscalar(t_starts_s):
+        t_starts_s = [float(t_starts_s)]
+    t_starts_s = [float(t) for t in t_starts_s]
+
+    panels = []
+    for t0 in t_starts_s:
+        traces = rec.get_traces(t0, t0 + win_ms / 1000.0, channels=order)
+        if highpass_hz:
+            traces = preprocess_ap(traces, rec.fs, highpass_hz, cmr=cmr)
+        panels.append((t0, traces))
 
     if clim_uv is None:
-        clim_uv = float(np.percentile(np.abs(traces), clim_pct)) or 1.0
+        pooled = np.concatenate([np.abs(p).ravel() for _t, p in panels])
+        clim_uv = float(np.percentile(pooled, clim_pct)) or 1.0
 
-    fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(traces.T, aspect="auto", origin="lower", cmap="RdBu_r",
-                   vmin=-clim_uv, vmax=clim_uv,
-                   extent=[0, win_ms, depths.min(), depths.max()],
-                   interpolation="nearest")
-    cbar = fig.colorbar(im, ax=ax, pad=0.02)
+    fig, axes = plt.subplots(1, len(panels), figsize=figsize, sharey=True,
+                             squeeze=False)
+    axes = axes[0]
+    for ax, (t0, traces) in zip(axes, panels, strict=True):
+        im = ax.imshow(traces.T, aspect="auto", origin="lower", cmap="RdBu_r",
+                       vmin=-clim_uv, vmax=clim_uv,
+                       extent=[0, win_ms, depths.min(), depths.max()],
+                       interpolation="nearest")
+        ax.set_xlabel("Time from window start (ms)")
+        despine(ax)
+        ax.set_title(f"{t0:.0f} s ({t0 / rec.duration_s * 100:.0f}% in)")
+        if artifact_z_um is not None and np.isfinite(artifact_z_um) \
+                and artifact_z_um < depths.max():
+            ax.axhline(artifact_z_um, color="0.2", lw=1.0, ls="--")
+            ax.text(win_ms, artifact_z_um, f" Above {artifact_z_um:.0f} µm ",
+                    ha="right", va="bottom", fontsize=8, color="0.2")
+    axes[0].set_ylabel(DEPTH_LABEL)
+
+    cbar = fig.colorbar(im, ax=axes, pad=0.02, fraction=0.03)
     cbar.set_label("Voltage (µV)")
-    ax.set_xlabel("Time from window start (ms)")
-    ax.set_ylabel(DEPTH_LABEL)
-    despine(ax)
-
-    if artifact_z_um is not None and np.isfinite(artifact_z_um) \
-            and artifact_z_um < depths.max():
-        ax.axhline(artifact_z_um, color="0.2", lw=1.0, ls="--")
-        ax.text(win_ms, artifact_z_um, f" Above {artifact_z_um:.0f} µm ",
-                ha="right", va="bottom", fontsize=8, color="0.2")
 
     band = f"high-passed at {highpass_hz:.0f} Hz" if highpass_hz else "wideband"
     ref = ", common median referenced" if (highpass_hz and cmr) else ""
-    ax.set_title(title or f"{rec.path.name}: {win_ms:.0f} ms from "
-                          f"{t_start_s:.0f} s ({band}{ref})")
-    fig.tight_layout()
+    fig.suptitle(title or f"{rec.path.name}: {win_ms:.0f} ms windows "
+                          f"({band}{ref}, shared color scale)", fontsize=12)
     return fig
 
 
@@ -226,9 +250,14 @@ def raw_with_spikes(rec, ks, t_start_s: float = 100.0, win_ms: float = 50.0,
         row = float(np.interp(d, chan_depths,
                               np.arange(len(chan_depths))))
         sel = clusters == uid
+        # Filled circles rather than tick marks. A vertical tick sits on top of
+        # a trace that is itself a thin vertical squiggle, so it reads as part
+        # of the signal; a filled disc with a pale edge separates from it at a
+        # glance, which is the whole job of this figure.
         ax.plot(times_ms[sel], np.full(sel.sum(), row * spacing_uv),
-                marker="|", linestyle="none", ms=9, mew=1.4,
-                color=colors[i], label=f"Unit {uid}")
+                marker="o", linestyle="none", ms=7, mew=0.8,
+                markerfacecolor=colors[i], markeredgecolor="white",
+                alpha=0.95, label=f"Unit {uid}", zorder=5)
         n_marked += int(sel.sum())
 
     ax.set_yticks(np.arange(len(chan_depths)) * spacing_uv)
@@ -244,23 +273,22 @@ def raw_with_spikes(rec, ks, t_start_s: float = 100.0, win_ms: float = 50.0,
     return fig
 
 
-def sample_waveforms(rec, ks, unit_id: int, n_waveforms: int = 100,
-                     win_ms: float = 3.0, n_channels: int = 6,
-                     highpass_hz: float | None = 300.0,
-                     title: str | None = None, figsize=(9, 7)):
-    """Individual spike waveforms for one unit, pulled from the raw file.
+def spike_snippets(rec, ks, unit_id: int, n_waveforms: int = 100,
+                   win_ms: float = 3.0, n_channels: int = 6,
+                   highpass_hz: float | None = 300.0, seed: int = 0):
+    """Pull individual spike waveforms for one unit out of the raw file.
 
-    The template is an average and hides everything an average hides. Drawing
-    the individual snippets shows amplitude spread, and shows immediately when a
-    "unit" is really two.
+    Returns (t_ms, stack, chans), where stack is
+    (n_snippets, n_samples, n_channels) in microvolts and chans is ordered
+    shallow to deep.
+
+    Separated from the plotting so the standalone figure and the example-neuron
+    grid extract snippets exactly the same way.
     """
-    import matplotlib.pyplot as plt
-    use_lab_style()
-
     st = ks.spike_times_s[ks.spike_clusters == unit_id]
     if st.size == 0:
         raise ValueError(f"unit {unit_id} has no spikes")
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
     take = st if st.size <= n_waveforms else rng.choice(st, n_waveforms, False)
     take = np.sort(take)
 
@@ -278,35 +306,64 @@ def sample_waveforms(rec, ks, unit_id: int, n_waveforms: int = 100,
             continue
         block = rec.get_traces(t - half, t + half, channels=chans)
         if highpass_hz:
+            # No common reference on a snippet: the six channels here are all
+            # neighbours of the same spike, so referencing them against each
+            # other would subtract the waveform being looked at.
             block = preprocess_ap(block, rec.fs, highpass_hz, cmr=False)
         if block.shape[0] >= n_samp:
             snippets.append(block[:n_samp])
     if not snippets:
         raise ValueError(f"no usable snippets for unit {unit_id}")
-    stack = np.stack(snippets)                       # (n, samples, channels)
-
+    stack = np.stack(snippets)
     t_ms = (np.arange(n_samp) / rec.fs - half) * 1000.0
-    step = float(np.percentile(np.abs(stack), 99.8)) * 2.2 or 50.0
+    return t_ms, stack, chans
 
-    fig, ax = plt.subplots(figsize=figsize)
+
+def draw_sample_waveforms(ax, ks, t_ms, stack, chans, show_depth_labels=True):
+    """Draw snippets with their mean into an existing axes."""
+    pos = ks.channel_positions
+    step = float(np.percentile(np.abs(stack), 99.8)) * 2.2 or 50.0
     for j in range(len(chans)):
         ax.plot(t_ms, stack[:, :, j].T + j * step, lw=0.35, color="0.65",
                 alpha=0.5)
         ax.plot(t_ms, stack[:, :, j].mean(0) + j * step, lw=1.6, color="crimson")
     ax.set_yticks(np.arange(len(chans)) * step)
-    ax.set_yticklabels([f"{pos[c, 1]:.0f}" for c in chans], fontsize=8)
-    ax.set_ylabel(DEPTH_LABEL)
+    if show_depth_labels:
+        ax.set_yticklabels([f"{pos[c, 1]:.0f}" for c in chans], fontsize=8)
+    else:
+        ax.set_yticklabels([])
     ax.set_xlabel("Time from spike (ms)")
     despine(ax)
 
     bar = _nice_round(step / 2.2)
     ax.plot([t_ms[-1]] * 2, [0, bar], lw=3, color="black",
             solid_capstyle="butt", clip_on=False)
-    ax.text(t_ms[-1], bar / 2, f" {bar:.0f} µV", va="center", fontsize=9)
+    ax.text(t_ms[-1], bar / 2, f" {bar:.0f} µV", va="center", fontsize=8)
+    return step
 
+
+def sample_waveforms(rec, ks, unit_id: int, n_waveforms: int = 100,
+                     win_ms: float = 3.0, n_channels: int = 6,
+                     highpass_hz: float | None = 300.0,
+                     title: str | None = None, figsize=(9, 7)):
+    """Individual spike waveforms for one unit, pulled from the raw file.
+
+    The template is an average and hides everything an average hides. Drawing
+    the individual snippets shows amplitude spread, and shows immediately when a
+    "unit" is really two.
+    """
+    import matplotlib.pyplot as plt
+    use_lab_style()
+
+    t_ms, stack, chans = spike_snippets(rec, ks, unit_id, n_waveforms, win_ms,
+                                        n_channels, highpass_hz)
+    n_total = int((ks.spike_clusters == unit_id).sum())
+
+    fig, ax = plt.subplots(figsize=figsize)
+    draw_sample_waveforms(ax, ks, t_ms, stack, chans)
+    ax.set_ylabel(DEPTH_LABEL)
     ax.set_title(title or ks.title(
-        f"Unit {unit_id}: {len(snippets)} spikes of {st.size:,} "
-        f"(mean in red)"))
+        f"Unit {unit_id}: {len(stack)} spikes of {n_total:,} (mean in red)"))
     fig.tight_layout()
     return fig
 

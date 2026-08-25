@@ -15,7 +15,7 @@ from ..style import DEPTH_LABEL, TIME_LABEL, despine, use_lab_style
 def channel_health(rec, n_chunks: int = 8, win_s: float = 1.0,
                    highpass_hz: float | None = 300.0,
                    dead_factor: float = 0.1, noisy_factor: float = 3.0,
-                   z_threshold: float = 5.0) -> dict:
+                   z_threshold: float = 5.0, neighborhood: int = 21) -> dict:
     """Per-channel RMS across several windows, with bad channels flagged.
 
     Sampling several short windows rather than one long one keeps the estimate
@@ -28,10 +28,16 @@ def channel_health(rec, n_chunks: int = 8, win_s: float = 1.0,
     median of 23.4, so the "noisy" threshold sits at 70 uV and nothing comes
     near it. A detector that cannot fire is not a check.
 
-    So the RMS is also scored as a robust z, (value - median) / (1.4826 * MAD),
-    which adapts to however tight the distribution actually is and flags a
-    channel that is anomalous for this recording. Both verdicts are returned
-    separately, neither is authoritative on its own, and the caller decides.
+    So the RMS is also scored as a robust z against its neighbours in depth,
+    over a window of neighborhood channels. Local rather than global, because
+    RMS varies smoothly along a probe for anatomical reasons and a global
+    comparison mistakes that gradient for a fault: on FD_008 imec2 shank0 it
+    flagged 111 of 384 channels, all of them part of one smooth rise from 29 uV
+    below 2000 um to 57 uV above it. A dead or shorted site differs from the
+    channels either side of it; a brain region does not.
+
+    Both verdicts are returned separately, neither is authoritative on its own,
+    and the caller decides.
     """
     rms_per_chunk = []
     for _t0, block in rec.sample_windows(n_chunks, win_s):
@@ -41,24 +47,55 @@ def channel_health(rec, n_chunks: int = 8, win_s: float = 1.0,
     rms = np.median(np.vstack(rms_per_chunk), axis=0)
 
     median = float(np.median(rms))
-    mad = float(np.median(np.abs(rms - median)))
+    geom = rec.geometry
+    depths = geom.y[:rec.n_data_channels] if geom is not None \
+        else np.arange(rec.n_data_channels, dtype=float)
+
+    # Compare each channel with its neighbours in depth, not with the whole
+    # array. Measured on FD_008 imec2 shank0: RMS is a tight 29 to 31 uV below
+    # 2000 um and rises smoothly to 57 uV above it, which is anatomy, not
+    # hardware. Scored against the global median that gradient flagged 111 of
+    # 384 channels; scored against the local one it flags almost none, and the
+    # two genuinely dead sites still stand out because a dead channel differs
+    # from its immediate neighbours and a brain region does not.
+    order = np.argsort(depths)
+    ranked = rms[order]
+    half = max(int(neighborhood) // 2, 1)
+    local_med = np.empty_like(ranked)
+    local_mad = np.empty_like(ranked)
+    for i in range(ranked.size):
+        lo = max(0, i - half)
+        hi = min(ranked.size, i + half + 1)
+        window = np.delete(ranked[lo:hi], min(i - lo, hi - lo - 1))
+        if window.size == 0:
+            window = ranked[lo:hi]
+        local_med[i] = np.median(window)
+        local_mad[i] = np.median(np.abs(window - local_med[i]))
+
+    z_ranked = np.zeros_like(ranked)
     # 1.4826 makes the MAD a consistent estimator of sigma for Gaussian data.
-    scale = 1.4826 * mad
-    z = (rms - median) / scale if scale > 0 else np.zeros_like(rms)
+    # A floor on the scale stops a perfectly uniform neighbourhood, where the
+    # MAD is ~0, from turning a 0.1 uV difference into an enormous z.
+    scale = np.maximum(1.4826 * local_mad, 0.05 * local_med)
+    good = scale > 0
+    z_ranked[good] = (ranked[good] - local_med[good]) / scale[good]
+    z = np.empty_like(z_ranked)
+    z[order] = z_ranked
+    local_median = np.empty_like(local_med)
+    local_median[order] = local_med
 
     dead = rms < dead_factor * median
     noisy = rms > noisy_factor * median
     outlier = (np.abs(z) > z_threshold) & ~dead & ~noisy
-    geom = rec.geometry
-    depths = geom.y[:rec.n_data_channels] if geom is not None \
-        else np.arange(rec.n_data_channels, dtype=float)
 
     return {
         "rms_uv": rms,
         "depth_um": depths,
         "median_rms_uv": median,
-        "mad_rms_uv": mad,
+        "local_median_rms_uv": local_median,
+        "mad_rms_uv": float(np.median(np.abs(rms - median))),
         "robust_z": z,
+        "neighborhood": int(neighborhood),
         "dead": dead,
         "noisy": noisy,
         "outlier": outlier,
@@ -97,10 +134,15 @@ def plot_channel_health(rec, result: dict | None = None, title: str | None = Non
                 label=f"Outlier, |z| > {r['z_threshold']:.0f} "
                       f"({r['n_outlier']})")
     ax.axvline(r["median_rms_uv"], color="0.55", ls="--", lw=1,
-               label=f"Median {r['median_rms_uv']:.1f} µV")
-    for sign in (-1, 1):
-        edge = r["median_rms_uv"] + sign * r["z_threshold"] * 1.4826 * r["mad_rms_uv"]
-        ax.axvline(edge, color="tab:orange", ls=":", lw=1)
+               label=f"Array median {r['median_rms_uv']:.1f} µV")
+    if "local_median_rms_uv" in r:
+        # The line the outlier test actually compares against. Drawing only the
+        # array median would suggest the flagged channels were judged against
+        # it, which on a probe with a real gradient they are not.
+        idx = np.argsort(r["depth_um"])
+        ax.plot(r["local_median_rms_uv"][idx], r["depth_um"][idx], lw=1.3,
+                color="tab:orange", alpha=0.8,
+                label=f"Local median ({r['neighborhood']} channels)")
 
     ax.set_xlabel("RMS noise (µV)")
     ax.set_ylabel(DEPTH_LABEL)

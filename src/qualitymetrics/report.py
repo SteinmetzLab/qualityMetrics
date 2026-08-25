@@ -136,7 +136,8 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             reason = ("no recording meta found, so microvolts are unknown; "
                       "amplitude figures need it")
             for name in ("amp_depth_scatter", "unit_drift", "drift_map",
-                         "amplitude_cdf_over_depth"):
+                         "amplitude_cdf_over_depth", "firing_rate_image",
+                         "depth_profiles", "depth_correlation"):
                 result.skipped[name] = reason
         else:
             _attempt(result, "amp_depth_scatter",
@@ -147,6 +148,12 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             _attempt(result, "drift_map", lambda: plots.drift_map(ks))
             _attempt(result, "amplitude_cdf_over_depth",
                      lambda: plots.amplitude_cdf_over_depth(ks))
+            _attempt(result, "firing_rate_image",
+                     lambda: plots.firing_rate_image(ks, duration_s=duration))
+            _attempt(result, "depth_profiles",
+                     lambda: plots.depth_profiles(ks, duration_s=duration))
+            _attempt(result, "depth_correlation",
+                     lambda: plots.depth_correlation(ks, duration_s=duration))
 
         _attempt(result, "templates_grid", lambda: plots.templates_grid(
             ks, unit_ids=_biggest_units(ks, example_units)))
@@ -160,11 +167,11 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             reason = "no archived recording found for this shank"
             for name in ("wall_heatmap", "raw_traces", "raw_with_spikes",
                          "channel_health", "filter_state", "band_rms",
-                         "sample_waveforms"):
+                         "sample_waveforms", "example_neurons"):
                 result.skipped[name] = reason
         else:
             _attempt(result, "wall_heatmap", lambda: plots.wall_heatmap(
-                rec, t_start_s=t_start_s, artifact_z_um=artifact_z_um))
+                rec, artifact_z_um=artifact_z_um))
             _attempt(result, "raw_traces",
                      lambda: plots.raw_traces(rec, t_start_s=t_start_s))
             _attempt(result, "raw_with_spikes", lambda: plots.raw_with_spikes(
@@ -178,13 +185,20 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             if biggest:
                 _attempt(result, "sample_waveforms",
                          lambda: plots.sample_waveforms(rec, ks, biggest[0]))
+            _attempt(result, "example_neurons",
+                     lambda: plots.example_neurons(rec, ks))
 
         power_rec = lf_rec or rec
         if power_rec is None:
             result.skipped["depth_power"] = "no recording found for this shank"
+            result.skipped["lfp_band_profiles"] = "no recording for this shank"
         else:
+            safe_start = min(t_start_s, power_rec.duration_s - 11)
             _attempt(result, "depth_power", lambda: plots.depth_power(
-                power_rec, t_start_s=min(t_start_s, power_rec.duration_s - 11)))
+                power_rec, t_start_s=safe_start))
+            _attempt(result, "lfp_band_profiles",
+                     lambda: plots.lfp_band_profiles(power_rec,
+                                                     t_start_s=safe_start))
 
         # ---- phy columns
         if write_phy and scale is not None:
