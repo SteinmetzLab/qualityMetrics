@@ -319,38 +319,100 @@ def spike_snippets(rec, ks, unit_id: int, n_waveforms: int = 100,
     return t_ms, stack, chans
 
 
-def draw_sample_waveforms(ax, ks, t_ms, stack, chans, show_depth_labels=True):
-    """Draw snippets with their mean into an existing axes."""
-    pos = ks.channel_positions
-    step = float(np.percentile(np.abs(stack), 99.8)) * 2.2 or 50.0
+def _site_spacing(pos):
+    """Column separation and row pitch of a set of sites, in micrometres."""
+    xs = np.unique(np.round(pos[:, 0], 3))
+    ys = np.unique(np.round(pos[:, 1], 3))
+    dx = float(np.min(np.diff(xs))) if xs.size > 1 else float("nan")
+    dy = float(np.median(np.diff(ys))) if ys.size > 1 else float("nan")
+    if not np.isfinite(dy) or dy <= 0:
+        dy = 15.0                       # Neuropixels 2.0 row pitch
+    if not np.isfinite(dx) or dx <= 0:
+        dx = 2 * dy                     # single-column probe: invent a width
+    return dx, dy
+
+
+def draw_waveforms_on_probe(ax, ks, t_ms, stack, chans, template=None,
+                            show_depth_labels=True, x_span_frac: float = 0.9,
+                            y_gain_rows: float = 1.5):
+    """Draw snippets at the sites they were recorded on, the way phy does.
+
+    Each channel's waveform is drawn centred on that channel's real position on
+    the shank, so a two-column probe produces two columns of waveforms and the
+    spatial spread of a unit is visible directly. A single vertical stack, which
+    is what this used to do, throws away the across-shank coordinate and makes a
+    unit centred on the left column look identical to one centred on the right.
+
+    Pass template as (t_ms, wave) in microvolts to overlay it. That overlay is
+    the check that matters: the template and the mean of the raw snippets are
+    computed from different things by different code, on the same channels and
+    the same time origin, so if they disagree something is genuinely wrong
+    rather than merely conventional.
+    """
+    pos = np.asarray(ks.channel_positions)[np.asarray(chans, dtype=int)]
+    dx, dy = _site_spacing(pos)
+
+    span_ms = float(t_ms[-1] - t_ms[0]) or 1.0
+    x_scale = (x_span_frac * dx) / span_ms            # micrometres per ms
+    peak_uv = float(np.percentile(np.abs(stack), 99.8)) or 1.0
+    if template is not None:
+        peak_uv = max(peak_uv, float(np.abs(template[1]).max()) or 1.0)
+    y_scale = (y_gain_rows * dy) / peak_uv            # micrometres per microvolt
+
     for j in range(len(chans)):
-        ax.plot(t_ms, stack[:, :, j].T + j * step, lw=0.35, color="0.65",
-                alpha=0.5)
-        ax.plot(t_ms, stack[:, :, j].mean(0) + j * step, lw=1.6, color="crimson")
-    ax.set_yticks(np.arange(len(chans)) * step)
-    if show_depth_labels:
-        ax.set_yticklabels([f"{pos[c, 1]:.0f}" for c in chans], fontsize=8)
-    else:
+        px, py = pos[j, 0], pos[j, 1]
+        x = px + t_ms * x_scale
+        ax.plot(x, py + stack[:, :, j].T * y_scale, lw=0.3, color="0.7",
+                alpha=0.22, zorder=1)
+        ax.plot(x, py + stack[:, :, j].mean(0) * y_scale, lw=1.5,
+                color="crimson", zorder=3)
+        if template is not None:
+            tt, tw = template
+            ax.plot(px + tt * x_scale, py + tw[:, j] * y_scale, lw=1.3,
+                    color="tab:blue", alpha=0.9, zorder=2)
+
+    ax.set_xticks(np.unique(np.round(pos[:, 0], 3)))
+    ax.set_xlabel("Position across shank (µm)")
+    ax.set_yticks(np.unique(np.round(pos[:, 1], 3)))
+    if not show_depth_labels:
         ax.set_yticklabels([])
-    ax.set_xlabel("Time from spike (ms)")
+    ax.tick_params(labelsize=7)
     despine(ax)
 
-    bar = _nice_round(step / 2.2)
-    ax.plot([t_ms[-1]] * 2, [0, bar], lw=3, color="black",
+    # Time is folded into the x coordinate and voltage into y, so neither axis
+    # can be read as a duration or a voltage. A scale bar for each is the only
+    # honest way to put units on this view.
+    bar_uv = _nice_round(peak_uv / 2)
+    bar_ms = _nice_round(span_ms / 3)
+    x0 = pos[:, 0].min() - 0.75 * dx
+    y0 = pos[:, 1].min() - 1.2 * dy
+    ax.plot([x0, x0], [y0, y0 + bar_uv * y_scale], lw=2.5, color="0.15",
             solid_capstyle="butt", clip_on=False)
-    ax.text(t_ms[-1], bar / 2, f" {bar:.0f} µV", va="center", fontsize=8)
-    return step
+    ax.text(x0, y0 + bar_uv * y_scale / 2, f" {bar_uv:.0f} µV", fontsize=7,
+            va="center", ha="left")
+    ax.plot([x0, x0 + bar_ms * x_scale], [y0, y0], lw=2.5, color="0.15",
+            solid_capstyle="butt", clip_on=False)
+    ax.text(x0 + bar_ms * x_scale / 2, y0, f"{bar_ms:g} ms ", fontsize=7,
+            va="top", ha="center")
+
+    ax.set_xlim(x0 - 0.35 * dx, pos[:, 0].max() + 0.75 * dx)
+    ax.set_ylim(y0 - 0.9 * dy, pos[:, 1].max() + 1.9 * dy)
+    return y_scale
 
 
 def sample_waveforms(rec, ks, unit_id: int, n_waveforms: int = 100,
-                     win_ms: float = 3.0, n_channels: int = 6,
-                     highpass_hz: float | None = 300.0,
-                     title: str | None = None, figsize=(9, 7)):
-    """Individual spike waveforms for one unit, pulled from the raw file.
+                     win_ms: float = 3.0, n_channels: int = 12,
+                     highpass_hz: float | None = 300.0, show_template: bool = True,
+                     title: str | None = None, figsize=(8, 9)):
+    """Individual spike waveforms for one unit, drawn on the probe layout.
 
     The template is an average and hides everything an average hides. Drawing
     the individual snippets shows amplitude spread, and shows immediately when a
     "unit" is really two.
+
+    The sorter's template is overlaid in blue by default. Both are in
+    microvolts on the same channels and the same time origin, so agreement is a
+    real check on the whole chain: gain, channel mapping and spike timing.
     """
     import matplotlib.pyplot as plt
     use_lab_style()
@@ -358,12 +420,20 @@ def sample_waveforms(rec, ks, unit_id: int, n_waveforms: int = 100,
     t_ms, stack, chans = spike_snippets(rec, ks, unit_id, n_waveforms, win_ms,
                                         n_channels, highpass_hz)
     n_total = int((ks.spike_clusters == unit_id).sum())
+    template = None
+    if show_template:
+        try:
+            template = ks.template_uv(unit_id, chans)
+        except Exception:  # noqa: BLE001 - the snippets are worth having alone
+            template = None
 
     fig, ax = plt.subplots(figsize=figsize)
-    draw_sample_waveforms(ax, ks, t_ms, stack, chans)
+    draw_waveforms_on_probe(ax, ks, t_ms, stack, chans, template=template)
     ax.set_ylabel(DEPTH_LABEL)
+    legend = "mean in red, template in blue" if template is not None \
+        else "mean in red"
     ax.set_title(title or ks.title(
-        f"Unit {unit_id}: {len(stack)} spikes of {n_total:,} (mean in red)"))
+        f"Unit {unit_id}: {len(stack)} spikes of {n_total:,} ({legend})"))
     fig.tight_layout()
     return fig
 

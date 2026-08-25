@@ -240,7 +240,8 @@ def test_autocorrelogram_finds_a_planted_refractory_gap():
 
 
 def test_example_neurons_is_a_three_by_three_with_metrics_on_it(rec, ks):
-    fig = plots.example_neurons(rec, ks, n_waveforms=10, acg_window_ms=20)
+    fig = plots.example_neurons(rec, ks, n_waveforms=10, acg_window_ms=20,
+                                n_channels=6)
     # 9 panels plus one colorbar per template panel.
     assert len(fig.axes) >= 9
     text = " ".join(t.get_text() for t in fig.findobj(
@@ -326,3 +327,63 @@ def test_a_smooth_depth_gradient_is_not_called_a_fault(recording_dir, tmp_path):
         result = plots.channel_health(rec, n_chunks=2, win_s=0.2)
     assert result["n_outlier"] == 0, \
         f"{result['n_outlier']} channels flagged on a smooth gradient"
+
+
+# ------------------------------------------------- probe layout and template
+
+def test_template_is_aligned_to_the_spike_time_not_the_window_start(ks):
+    """Kilosort records spike times at sample nt0min of the template window.
+
+    Ignoring that offsets an overlaid template by two thirds of a millisecond,
+    which looks exactly like a shape mismatch and is only a convention.
+    """
+    t_ms, wave = ks.template_uv(0)
+    assert wave.shape[0] == ks.templates.shape[1]
+    # Zero must fall inside the window, at the recorded origin.
+    i0 = int(np.argmin(np.abs(t_ms)))
+    assert i0 == ks.nt0min
+    assert t_ms[0] < 0 < t_ms[-1]
+
+
+def test_template_and_snippets_share_units_and_channels(rec, ks):
+    """The overlay is only a check if both sides are microvolts on one basis."""
+    uid = int(ks.unit_ids[0])
+    _t, stack, chans = plots.spike_snippets(rec, ks, uid, n_waveforms=20,
+                                            n_channels=6)
+    _tt, tw = ks.template_uv(uid, chans)
+    assert tw.shape[1] == stack.shape[2] == len(chans)
+    # Same order of magnitude: both are microvolts off the same recording.
+    assert 0.05 < np.abs(tw).max() / np.abs(stack).max() < 20
+
+
+def test_waveforms_are_drawn_at_their_real_site_positions(rec, ks):
+    """A single vertical stack throws away the across-shank coordinate.
+
+    Two columns of sites must produce two columns of waveforms, or a unit on the
+    left column is indistinguishable from one on the right.
+    """
+    uid = int(ks.unit_ids[0])
+    fig = plots.sample_waveforms(rec, ks, uid, n_waveforms=10, n_channels=12)
+    ax = fig.axes[0]
+    site_x = np.unique(np.round(ks.channel_positions[:, 0], 3))
+    assert len(site_x) > 1, "fixture should have two columns"
+    assert np.allclose(np.sort(ax.get_xticks()), np.sort(site_x))
+    # Traces must actually straddle both columns.
+    xs = np.concatenate([ln.get_xdata() for ln in ax.lines if len(ln.get_xdata())])
+    assert xs.min() < site_x.mean() < xs.max()
+
+
+def test_example_neurons_uses_units_that_passed_qc(ks):
+    passing = [u for u in ks.unit_ids if ks.qc_pass.get(int(u))]
+    picks = ks.units_at_amplitude_percentiles((95, 75, 50), passing_only=True)
+    if passing:
+        assert set(picks) <= set(int(u) for u in passing)
+
+
+def test_percentile_pick_falls_back_when_nothing_passes(ks, monkeypatch):
+    """A sort where no unit passes is exactly one someone needs to look at."""
+    monkeypatch.setattr(type(ks), "qc_pass",
+                        property(lambda self: {int(u): False
+                                               for u in self.unit_ids}))
+    picks = ks.units_at_amplitude_percentiles((95, 75, 50), passing_only=True)
+    assert len(picks) == 3

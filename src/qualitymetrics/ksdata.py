@@ -189,6 +189,46 @@ class KilosortResults:
         unw = self.templates_unwhitened
         return np.ptp(unw, axis=1).argmax(axis=1)
 
+    @cached_property
+    def nt0min(self) -> int:
+        """Which template sample the spike time refers to.
+
+        Kilosort stores templates as a fixed-length window and records spike
+        times at one particular sample within it, ``nt0min``, which is 20 of 61
+        by default. Without this, a template overlaid on a raw snippet is offset
+        by two thirds of a millisecond and looks like a shape mismatch when it
+        is only a timing convention.
+        """
+        ops_path = self.path / "ops.npy"
+        if ops_path.exists():
+            try:
+                ops = np.load(ops_path, allow_pickle=True).item()
+                if "nt0min" in ops:
+                    return int(ops["nt0min"])
+            except Exception:  # noqa: BLE001 - fall back to the default
+                pass
+        return 20
+
+    def template_uv(self, unit_id: int, channels=None):
+        """One unit's template in microvolts, on the spike-time axis.
+
+        Returns (t_ms, wave) where t_ms is zero at the spike time, so the result
+        drops straight onto a raw snippet for comparison. Unwhitened and scaled
+        by the recording gain, which puts it in the same units as the snippet:
+        if the two do not then agree, the disagreement is real and not a
+        difference of convention.
+        """
+        if self.uv_per_bit is None:
+            raise KsError("a template in microvolts needs uv_per_bit")
+        unw = self.templates_unwhitened
+        if unit_id >= len(unw):
+            raise KsError(f"unit {unit_id} has no template")
+        wave = unw[unit_id]
+        if channels is not None:
+            wave = wave[:, np.asarray(channels, dtype=int)]
+        t_ms = (np.arange(wave.shape[0]) - self.nt0min) / self.fs * 1000.0
+        return t_ms, wave * self.uv_per_bit
+
     # -- per-unit ----------------------------------------------------------
 
     @cached_property
@@ -409,15 +449,25 @@ class KilosortResults:
             lines.append(f"QC {'pass' if passed else 'fail'} ({self.qc_source})")
         return lines
 
-    def units_at_amplitude_percentiles(self, percentiles=(95, 75, 50)
-                                       ) -> list[int]:
+    def units_at_amplitude_percentiles(self, percentiles=(95, 75, 50),
+                                       passing_only: bool = True) -> list[int]:
         """The units sitting at given percentiles of the amplitude distribution.
 
         Picking by percentile rather than by rank gives examples that represent
         the recording. The single largest unit is usually atypical, which is why
         95 is a better "big unit" than the maximum.
+
+        Restricted to units that passed quality control by default. A rejected
+        unit can be anything at all, so showing one teaches nothing about the
+        recording; the point of an example is to be representative of what will
+        actually be analysed.
         """
         amps = self.unit_amplitude_uv
+        if passing_only:
+            passing = {u: a for u, a in amps.items() if self.qc_pass.get(u)}
+            # Fall back rather than return nothing: a sort where no unit passes
+            # is exactly a sort someone needs to look at.
+            amps = passing or amps
         if not amps:
             return []
         ids = np.array(sorted(amps))

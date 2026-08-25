@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..style import AMP_LABEL, DEPTH_LABEL, despine, use_lab_style
-from .rawviews import draw_sample_waveforms, spike_snippets
+from .rawviews import draw_waveforms_on_probe, spike_snippets
 
 
 def draw_template_waterfall(ax, ks, unit_id: int, depth_pad_um: float = 250.0):
@@ -85,20 +85,29 @@ def draw_acg(ax, ks, unit_id: int, window_ms: float = 50.0,
 
 def example_neurons(rec, ks, unit_ids=None, percentiles=(95, 75, 50),
                     n_waveforms: int = 150, win_ms: float = 3.0,
-                    n_channels: int = 6, acg_window_ms: float = 50.0,
-                    title: str | None = None, figsize=(15, 13)):
+                    n_channels: int = 12, acg_window_ms: float = 50.0,
+                    passing_only: bool = True, title: str | None = None,
+                    figsize=(15, 14)):
     """Three representative units, three views each.
 
-    Rows are raw snippets, template over depth, and autocorrelogram. Columns are
-    units taken at the given percentiles of the amplitude distribution, largest
-    on the left. Each column is annotated with that unit's quality metrics.
+    Rows are raw snippets on the probe layout, template over depth, and
+    autocorrelogram. Columns are units taken at the given percentiles of the
+    amplitude distribution, largest on the left, restricted to units that passed
+    quality control. A rejected unit can be anything at all, so it says nothing
+    about what the recording will actually yield.
+
+    Each column is annotated with that unit's metrics, and the top panel carries
+    the sorter's template in blue over the mean snippet in red.
     """
     import matplotlib.pyplot as plt
     use_lab_style()
 
     if unit_ids is None:
-        unit_ids = ks.units_at_amplitude_percentiles(percentiles)
-        labels = [f"{p}th percentile amplitude" for p in percentiles]
+        unit_ids = ks.units_at_amplitude_percentiles(
+            percentiles, passing_only=passing_only)
+        labels = [f"{p}th percentile of QC-passing amplitude"
+                  if passing_only else f"{p}th percentile amplitude"
+                  for p in percentiles]
     else:
         unit_ids = [int(u) for u in unit_ids]
         labels = [""] * len(unit_ids)
@@ -109,14 +118,19 @@ def example_neurons(rec, ks, unit_ids=None, percentiles=(95, 75, 50),
     fig, axes = plt.subplots(3, n, figsize=figsize, squeeze=False)
 
     for col, uid in enumerate(unit_ids):
-        # -- row 0: raw snippets, with the metrics printed beside them
+        # -- row 0: raw snippets on the probe layout, template overlaid
         ax = axes[0][col]
         try:
             t_ms, stack, chans = spike_snippets(
                 rec, ks, uid, n_waveforms=n_waveforms, win_ms=win_ms,
                 n_channels=n_channels)
-            draw_sample_waveforms(ax, ks, t_ms, stack, chans,
-                                  show_depth_labels=(col == 0))
+            try:
+                template = ks.template_uv(uid, chans)
+            except Exception:  # noqa: BLE001 - snippets still worth drawing
+                template = None
+            draw_waveforms_on_probe(ax, ks, t_ms, stack, chans,
+                                    template=template,
+                                    show_depth_labels=(col == 0))
             shown = f"{len(stack)} of {ks.n_spikes.get(uid, 0):,} spikes"
         except Exception as exc:  # noqa: BLE001 - one bad unit must not stop it
             ax.text(0.5, 0.5, f"No snippets\n({type(exc).__name__})",
@@ -126,8 +140,8 @@ def example_neurons(rec, ks, unit_ids=None, percentiles=(95, 75, 50),
             shown = "no snippets"
         header = f"Unit {uid}"
         if labels[col]:
-            header += f", {labels[col]}"
-        ax.set_title(f"{header}\n{shown}, mean in red", fontsize=10)
+            header += f"\n{labels[col]}"
+        ax.set_title(f"{header}\n{shown}: mean red, template blue", fontsize=9)
 
         summary = ks.qc_summary(uid)
         if summary:
