@@ -363,7 +363,7 @@ def draw_waveforms_on_probe(ax, ks, t_ms, stack, chans, template=None,
         px, py = pos[j, 0], pos[j, 1]
         x = px + t_ms * x_scale
         ax.plot(x, py + stack[:, :, j].T * y_scale, lw=0.3, color="0.7",
-                alpha=0.22, zorder=1)
+                alpha=0.10, zorder=1)
         ax.plot(x, py + stack[:, :, j].mean(0) * y_scale, lw=1.5,
                 color="crimson", zorder=3)
         if template is not None:
