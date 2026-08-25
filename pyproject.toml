@@ -22,6 +22,9 @@ dependencies = [
 compressed = ["mtscomp>=1.0.2", "tqdm"]
 # slidingRP supplies the refractory contamination column.
 refractory = ["slidingRP"]
+# ibl-neuropixel supplies destriping, which removes ADC-skewed line noise that a
+# plain common median reference leaves behind as banding down the probe.
+destripe = ["ibl-neuropixel"]
 dev = [
     "pytest>=7",
     "ruff>=0.4",

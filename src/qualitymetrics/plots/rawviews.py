@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..preproc import destripe as ibl_destripe
 from ..preproc import preprocess_ap
 from ..style import DEPTH_LABEL, despine, use_lab_style
 
@@ -49,6 +50,7 @@ def _filtered_window(rec, t_start_s, win_ms, highpass_hz, cmr, channels):
 
 def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
                  highpass_hz: float | None = 300.0, cmr: bool = True,
+                 destripe: bool = False,
                  clim_uv: float | None = None, clim_pct: float = 99.5,
                  artifact_z_um: float | None = None, title: str | None = None,
                  figsize=(15, 8)):
@@ -83,9 +85,17 @@ def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
 
     panels = []
     for t0 in t_starts_s:
-        traces = rec.get_traces(t0, t0 + win_ms / 1000.0, channels=order)
-        if highpass_hz:
-            traces = preprocess_ap(traces, rec.fs, highpass_hz, cmr=cmr)
+        if destripe:
+            # Destriping needs every channel in probe order, because it corrects
+            # ADC sampling skew and filters across the array; handing it a
+            # depth-sorted subset would scramble both. Sort into depth order
+            # afterwards instead.
+            full = rec.get_traces(t0, t0 + win_ms / 1000.0)
+            traces = ibl_destripe(full, rec.fs, geometry=rec.geometry)[:, order]
+        else:
+            traces = rec.get_traces(t0, t0 + win_ms / 1000.0, channels=order)
+            if highpass_hz:
+                traces = preprocess_ap(traces, rec.fs, highpass_hz, cmr=cmr)
         panels.append((t0, traces))
 
     if clim_uv is None:
@@ -113,10 +123,15 @@ def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
     cbar = fig.colorbar(im, ax=axes, pad=0.02, fraction=0.03)
     cbar.set_label("Voltage (µV)")
 
-    band = f"high-passed at {highpass_hz:.0f} Hz" if highpass_hz else "wideband"
-    ref = ", common median referenced" if (highpass_hz and cmr) else ""
+    if destripe:
+        how = "destriped (IBL: ADC phase, high-pass, spatial filter)"
+    else:
+        band = (f"high-passed at {highpass_hz:.0f} Hz" if highpass_hz
+                else "wideband")
+        how = band + (", common median referenced" if (highpass_hz and cmr)
+                      else "")
     fig.suptitle(title or f"{rec.path.name}: {win_ms:.0f} ms windows "
-                          f"({band}{ref}, shared color scale)", fontsize=12)
+                          f"({how}, shared color scale)", fontsize=12)
     return fig
 
 

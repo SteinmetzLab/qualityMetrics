@@ -97,3 +97,48 @@ def channel_rms(traces: np.ndarray, subtract_median: bool = True
     if subtract_median:
         traces = traces - np.median(traces, axis=0, keepdims=True)
     return np.sqrt(np.mean(traces ** 2, axis=0))
+
+
+def destripe_available() -> bool:
+    """Is IBL's destriping importable here?"""
+    try:
+        import ibldsp.voltage  # noqa: F401
+        import neuropixel  # noqa: F401
+    except Exception:  # noqa: BLE001 - optional
+        return False
+    return True
+
+
+def destripe(traces: np.ndarray, fs: float, geometry=None,
+             neuropixel_version: int = 2, k_filter: bool = True) -> np.ndarray:
+    """IBL's destriping: ADC phase correction, high-pass, then a spatial filter.
+
+    A stronger clean-up than high-pass plus common median reference, and aimed
+    at a different artifact. Common median subtraction removes whatever is
+    identical across channels at one instant. Destriping first undoes the ADC
+    sampling skew, so channels digitised at different moments line up before
+    anything is subtracted, and then applies a spatial filter across the array.
+    Line noise and its harmonics arrive with exactly that skew, which is why
+    they survive a plain common reference and show up as regular horizontal
+    banding down the probe.
+
+    Takes and returns (n_samples, n_channels) in microvolts. IBL works in volts
+    with channels first, so the conversion happens here rather than at every
+    call site.
+
+    Pass geometry to use the recording's real site positions. Without it, the
+    standard header for the probe version is used, whose depth origin is offset
+    by 20 um from ours; that offset does not change the spatial filter, but
+    relying on it would be an assumption nobody would remember making.
+    """
+    import ibldsp.voltage as voltage
+    from neuropixel import trace_header
+
+    x = np.asarray(traces, dtype=np.float64).T * 1e-6      # volts, channels first
+    header = trace_header(version=neuropixel_version, nshank=1)
+    if geometry is not None and len(geometry.x) >= x.shape[0]:
+        header = dict(header)
+        header["x"] = np.asarray(geometry.x[:x.shape[0]], dtype=float)
+        header["y"] = np.asarray(geometry.y[:x.shape[0]], dtype=float)
+    cleaned = voltage.destripe(x, fs=fs, h=header, k_filter=k_filter)
+    return (np.asarray(cleaned).T * 1e6).astype(np.float32)
