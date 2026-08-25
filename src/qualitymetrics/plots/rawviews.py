@@ -334,7 +334,7 @@ def _site_spacing(pos):
 
 def draw_waveforms_on_probe(ax, ks, t_ms, stack, chans, template=None,
                             show_depth_labels=True, x_span_frac: float = 0.9,
-                            y_gain_rows: float = 1.5):
+                            y_gain_rows: float = 2.5, noise_rows: float = 9.0):
     """Draw snippets at the sites they were recorded on, the way phy does.
 
     Each channel's waveform is drawn centred on that channel's real position on
@@ -357,7 +357,20 @@ def draw_waveforms_on_probe(ax, ks, t_ms, stack, chans, template=None,
     peak_uv = float(np.percentile(np.abs(stack), 99.8)) or 1.0
     if template is not None:
         peak_uv = max(peak_uv, float(np.abs(template[1]).max()) or 1.0)
-    y_scale = (y_gain_rows * dy) / peak_uv            # micrometres per microvolt
+
+    # Two candidate vertical scales, and the tighter of the two wins, so that
+    # rows are separated by visible whitespace in either regime.
+    #
+    # The spread of the individual traces is what actually fills the gap between
+    # channels, so give each row noise_rows times the trace-to-trace standard
+    # deviation and the clouds stop touching. On a unit whose spike is large
+    # compared with the noise that rule alone would throw the mean many rows
+    # clear of its own channel, so it is bounded by a second rule that keeps the
+    # largest excursion inside y_gain_rows rows.
+    noise_uv = float(np.median(np.std(stack, axis=0))) or 1.0
+    y_from_noise = dy / (noise_rows * noise_uv)
+    y_from_peak = (y_gain_rows * dy) / peak_uv
+    y_scale = min(y_from_noise, y_from_peak)          # micrometres per microvolt
 
     for j in range(len(chans)):
         px, py = pos[j, 0], pos[j, 1]

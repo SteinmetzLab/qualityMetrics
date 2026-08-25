@@ -223,7 +223,6 @@ def test_autocorrelogram_finds_a_planted_refractory_gap():
     """A synthetic train with an enforced 5 ms gap must show an empty centre."""
     import types
 
-    fs = 30000.0
     rng = np.random.default_rng(0)
     times = np.cumsum(rng.uniform(0.006, 0.05, 4000))
     fake = types.SimpleNamespace(

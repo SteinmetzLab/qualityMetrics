@@ -137,7 +137,8 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                       "amplitude figures need it")
             for name in ("amp_depth_scatter", "unit_drift", "drift_map",
                          "amplitude_cdf_over_depth", "firing_rate_image",
-                         "depth_profiles", "depth_correlation"):
+                         "depth_profiles", "depth_correlation",
+                         "noise_cutoff_diagnostic"):
                 result.skipped[name] = reason
         else:
             _attempt(result, "amp_depth_scatter",
@@ -157,17 +158,16 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
 
         _attempt(result, "templates_grid", lambda: plots.templates_grid(
             ks, unit_ids=_biggest_units(ks, example_units)))
-        biggest = _biggest_units(ks, 1)
-        if biggest:
-            _attempt(result, "template_waterfall",
-                     lambda: plots.template_waterfall(ks, biggest[0]))
+        if scale is not None:
+            _attempt(result, "noise_cutoff_diagnostic",
+                     lambda: plots.noise_cutoff_diagnostic(ks))
 
         # ---- figures that need the raw file
         if rec is None:
             reason = "no archived recording found for this shank"
             for name in ("wall_heatmap", "raw_traces", "raw_with_spikes",
                          "channel_health", "filter_state", "band_rms",
-                         "sample_waveforms", "example_neurons"):
+                         "example_neurons"):
                 result.skipped[name] = reason
         else:
             _attempt(result, "wall_heatmap", lambda: plots.wall_heatmap(
@@ -182,9 +182,6 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                      lambda: plots.filter_state(rec)[0])
             _attempt(result, "band_rms",
                      lambda: plots.band_rms(rec, lf_rec=lf_rec))
-            if biggest:
-                _attempt(result, "sample_waveforms",
-                         lambda: plots.sample_waveforms(rec, ks, biggest[0]))
             _attempt(result, "example_neurons",
                      lambda: plots.example_neurons(rec, ks))
 
@@ -192,6 +189,7 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
         if power_rec is None:
             result.skipped["depth_power"] = "no recording found for this shank"
             result.skipped["lfp_band_profiles"] = "no recording for this shank"
+            result.skipped["depth_power_wide"] = "no recording for this shank"
         else:
             safe_start = min(t_start_s, power_rec.duration_s - 11)
             _attempt(result, "depth_power", lambda: plots.depth_power(
@@ -199,6 +197,14 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             _attempt(result, "lfp_band_profiles",
                      lambda: plots.lfp_band_profiles(power_rec,
                                                      t_start_s=safe_start))
+            # The wideband version goes on the AP recording, not the LFP one:
+            # the point is the noise above 300 Hz, which the LF band does not
+            # contain.
+            if rec is not None:
+                _attempt(result, "depth_power_wide",
+                         lambda: plots.depth_power_wide(
+                             rec, t_start_s=min(t_start_s,
+                                                rec.duration_s - 5)))
 
         # ---- phy columns
         if write_phy and scale is not None:

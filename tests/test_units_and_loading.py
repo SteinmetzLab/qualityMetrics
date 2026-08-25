@@ -9,12 +9,14 @@ import numpy as np
 import pytest
 
 from qualitymetrics import KilosortResults, RawRecording, parse_meta
-from qualitymetrics.metrics import (CONTAMINATION_CENSORED, noise_cutoff,
-                                    write_cluster_tsv)
+from qualitymetrics.metrics import (
+    CONTAMINATION_CENSORED,
+    noise_cutoff,
+    write_cluster_tsv,
+)
 from qualitymetrics.raw import geometry_from_meta, uv_per_bit
 
 from .conftest import FS, N_CHANNELS, UV_PER_BIT
-
 
 # ---------------------------------------------------------------- metadata
 
@@ -37,7 +39,9 @@ def test_lf_band_falls_back_to_the_ap_gain(recording_dir):
 
 
 def test_uv_per_bit_refuses_to_guess():
-    with pytest.raises(Exception):
+    from qualitymetrics.raw import RawError
+
+    with pytest.raises(RawError):
         uv_per_bit({"imAiRangeMax": "0.62"}, "ap")
 
 
@@ -83,9 +87,11 @@ def test_spike_times_are_seconds(sorter_output):
 
 
 def test_amplitudes_require_a_gain_rather_than_defaulting_to_one(sorter_output):
+    from qualitymetrics.ksdata import KsError
+
     ks = KilosortResults.load(sorter_output)          # no uv_per_bit
-    with pytest.raises(Exception):
-        ks.unit_amplitude_uv
+    with pytest.raises(KsError):
+        _ = ks.unit_amplitude_uv
 
 
 def test_unit_amplitudes_are_physically_plausible(sorter_output):
