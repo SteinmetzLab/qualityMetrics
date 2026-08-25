@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qualitymetrics"
+version = "2.0.0"
+description = "Quality metrics and QC figures for Neuropixels recordings"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Steinmetz Lab" }]
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "matplotlib>=3.6",
+]
+
+[project.optional-dependencies]
+# mtscomp is what reads the archived .cbin. Without it the sorter-only figures
+# still work and the raw ones report why they were skipped.
+compressed = ["mtscomp>=1.0.2", "tqdm"]
+# slidingRP supplies the refractory contamination column.
+refractory = ["slidingRP"]
+dev = [
+    "pytest>=7",
+    "ruff>=0.4",
+    "mtscomp>=1.0.2",
+    "tqdm",
+]
+
+[project.scripts]
+qm = "qualitymetrics.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

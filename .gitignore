@@ -1,3 +1,9 @@
-
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+figures/
 *.asv
-matlab/Instructions_upload_electrode_tracks_to_alyx.txt
