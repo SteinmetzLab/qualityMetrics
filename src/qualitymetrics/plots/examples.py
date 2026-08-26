@@ -51,36 +51,50 @@ def draw_template_waterfall(ax, ks, unit_id: int, depth_pad_um: float = 250.0):
 
 
 def draw_acg(ax, ks, unit_id: int, window_ms: float = 50.0,
-             bin_ms: float = 0.5, refractory_ms: float = 2.0):
-    """Autocorrelogram into an existing axes, with the refractory window marked.
+             bin_ms: float = 0.1, log_x: bool = True,
+             rp_min_val_ms: float | None = None):
+    """Autocorrelogram into an existing axes, on a logarithmic lag axis.
 
-    The refractory shading is the point of comparison: a real single unit has a
-    visible dip there, and a contaminated one does not. Marking it means the
-    reader does not have to measure it off the axis.
+    Log-spaced lags after the manner of myACG in cortex-lab/spikes. A linear
+    axis out to 50 ms puts the entire refractory question into the first two
+    pixels, and whether a dip is 0.25 ms wide or 2 ms wide is exactly what
+    decides if it is a neuron, a deduplication window, or structured noise.
+    Only the positive half is drawn, since the function is symmetric by
+    construction and mirroring it wastes half the axis.
+
+    rp_min_val_ms, from slidingRP, marks the refractory duration at which that
+    unit's contamination estimate was minimised. That is the width the metric
+    itself settled on, which beats any fixed band drawn by eye.
+
+    Returns nothing to be interpreted as a metric. An earlier version returned
+    a ratio of counts inside a 2 ms window to counts in the flanks and printed
+    it on the figure, which was a worse version of what slidingRP computes
+    properly, and it invited exactly the wrong reading.
     """
     lags, counts = ks.autocorrelogram(unit_id, window_ms, bin_ms)
     if lags.size == 0:
         ax.text(0.5, 0.5, "Too few spikes", transform=ax.transAxes,
                 ha="center", va="center", fontsize=9, color="0.4")
         despine(ax)
-        return float("nan")
+        return
 
-    ax.bar(lags, counts, width=bin_ms, color="0.3", linewidth=0)
-    ax.axvspan(-refractory_ms, refractory_ms, color="crimson", alpha=0.13,
-               zorder=0)
+    positive = lags > 0
+    lag, count = lags[positive], counts[positive]
+    ax.step(lag, count, where="mid", color="0.25", lw=1.0)
+    ax.fill_between(lag, count, step="mid", color="0.35", alpha=0.5)
+
+    if rp_min_val_ms is not None and np.isfinite(rp_min_val_ms)             and rp_min_val_ms > 0:
+        ax.axvline(rp_min_val_ms, color="crimson", lw=1.2, ls="--")
+        ax.text(rp_min_val_ms, ax.get_ylim()[1], f" {rp_min_val_ms:.2f} ms",
+                color="crimson", fontsize=7, va="top", ha="left")
+
+    if log_x:
+        ax.set_xscale("log")
+        ax.set_xlim(max(bin_ms / 2, 0.05), window_ms)
+    else:
+        ax.set_xlim(0, window_ms)
     ax.set_xlabel("Lag (ms)")
-    ax.set_xlim(-window_ms, window_ms)
     despine(ax)
-
-    # A crude contamination read straight off the plot: how full is the
-    # refractory window compared with the flanks. Not a substitute for the
-    # sliding refractory metric, which is on the figure as a number, but it puts
-    # the picture and the statistic side by side.
-    inside = counts[np.abs(lags) <= refractory_ms]
-    outside = counts[np.abs(lags) > window_ms * 0.5]
-    if outside.size and outside.mean() > 0:
-        return float(inside.mean() / outside.mean())
-    return float("nan")
 
 
 def example_neurons(rec, ks, unit_ids=None, percentiles=(95, 75, 50),
@@ -168,11 +182,20 @@ def example_neurons(rec, ks, unit_ids=None, percentiles=(95, 75, 50),
                     fontsize=9, color="0.4")
             despine(ax)
 
-        # -- row 2: the autocorrelogram
+        # -- row 2: the autocorrelogram, annotated from slidingRP rather than
+        # from anything measured off the picture.
         ax = axes[2][col]
-        ratio = draw_acg(ax, ks, uid, window_ms=acg_window_ms)
-        note = ("" if not np.isfinite(ratio)
-                else f", refractory fill {ratio * 100:.0f}% of flanks")
+        rp = (ks.metrics_by_unit().get(uid, {}) or {})
+        rp_min = rp.get("sliding_rp_rp_min_val_ms")
+        draw_acg(ax, ks, uid, window_ms=acg_window_ms,
+                 rp_min_val_ms=rp_min)
+        cont = rp.get("sliding_rp_contamination")
+        if cont is None:
+            note = ""
+        elif not np.isfinite(cont):
+            note = ", contamination above the 35% cap"
+        else:
+            note = f", contamination {cont:.1f}%"
         ax.set_title(f"Autocorrelogram{note}", fontsize=9)
 
     axes[0][0].set_ylabel(DEPTH_LABEL)
