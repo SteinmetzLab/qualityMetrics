@@ -225,3 +225,87 @@ def _biggest_units(ks: KilosortResults, n: int) -> list[int]:
     """The n units with the most spikes, which are the ones worth showing."""
     counts = ks.n_spikes
     return [u for u, _ in sorted(counts.items(), key=lambda kv: -kv[1])[:n]]
+
+
+def build_session_report(session_dir: str | Path, out_dir: str | Path,
+                         noise: bool = True) -> ReportResult:
+    """Make the figures that describe a whole session rather than one shank.
+
+    ``session_dir`` is the numbered session folder, or its ``sorting``
+    directory. Every shank under it is read; unusable ones are named on the
+    figures rather than quietly dropped, so a partial session cannot be
+    mistaken for a whole one.
+
+    Two rasters are drawn, every sorted unit and only those that passed quality
+    control, the second from the verdicts already in ``quality_metrics.json``.
+    Nothing is recomputed. ``noise`` also measures the AP band from the
+    archived files, which needs ``mtscomp`` and reads about a minute of data
+    for a sixteen shank session; it is skipped with a reason when the files or
+    the package are not there.
+    """
+    from .plots import session as sessionplots
+
+    session_dir = Path(session_dir)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = ReportResult(out_dir=out_dir)
+
+    found = sessionplots.find_session_shanks(session_dir)
+    if not found.shanks:
+        reason = "; ".join(found.incomplete) or "no sorted shanks found"
+        result.skipped["session_raster_all_units"] = reason
+        result.skipped["session_raster_passing"] = reason
+        result.skipped["session_rms_across_shanks"] = reason
+        return result
+
+    label = f"{session_dir.parent.parent.name} {session_dir.parent.name}".strip()
+    # Named on the figure, not only in a log beside it.
+    caveat = (f"   Unusable and left out: {'; '.join(found.incomplete)}"
+              if found.incomplete else "")
+    totals = sum(int(s.quality_metrics().get("n_units_total", 0))
+                 for s in found.shanks)
+
+    _attempt(result, "session_raster_all_units", lambda: sessionplots.session_raster(
+        found.shanks,
+        title=f"{label}: every sorted unit".strip(),
+        subtitle=(f"{found.describe}. Every unit the sorter produced, with no "
+                  f"quality filtering. Row shading is each unit's rate "
+                  f"normalised to its own maximum.{caveat}")))
+
+    passing = sum(len(s.passing_units("pass_rescued") or ()) for s in found.shanks)
+    _attempt(result, "session_raster_passing", lambda: sessionplots.session_raster(
+        found.shanks, criterion="pass_rescued",
+        title=f"{label}: units passing quality control".strip(),
+        subtitle=(f"{found.describe}. {passing} of {totals} units pass, by the "
+                  f"verdicts recorded in quality_metrics.json at sort time; "
+                  f"nothing is recomputed here.{caveat}")))
+
+    if not noise:
+        result.skipped["session_rms_across_shanks"] = "not requested"
+        return result
+
+    measured, failures = [], {}
+    for shank in found.shanks:
+        try:
+            measured.append(sessionplots.channel_rms(shank))
+        except Exception as exc:  # noqa: BLE001 - one shank must not stop the rest
+            failures[shank.label] = f"{type(exc).__name__}: {exc}"
+    if not measured:
+        result.skipped["session_rms_across_shanks"] = (
+            "; ".join(f"{k}: {v}" for k, v in failures.items())
+            or "no shank yielded a measurement")
+        return result
+
+    missing = f"   No measurement: {', '.join(failures)}" if failures else ""
+    _attempt(result, "session_rms_across_shanks",
+             lambda: sessionplots.rms_across_shanks(
+                 measured,
+                 title=f"{label}: recording noise, every shank".strip(),
+                 subtitle=(f"{found.describe}. Per-site AP band RMS from "
+                           f"{sessionplots.NOISE_WINDOWS} windows of "
+                           f"{sessionplots.NOISE_WINDOW_S:g} s per shank. "
+                           f"Dashed line is the session median."
+                           f"{missing}{caveat}")))
+    result.made["session_rms_per_shank.csv"] = sessionplots.noise_table(
+        measured, out_dir / "session_rms_per_shank.csv")
+    return result
