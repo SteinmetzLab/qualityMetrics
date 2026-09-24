@@ -106,14 +106,32 @@ class _Shank:
         np.save(path / "channel_positions.npy",
                 np.column_stack([np.tile([0.0, 32.0], N_CH // 2), y]))
         self.ks = _KS(path)
+        self.directory = path
+
+
+#: What the fixture's first shank "kept": a 2 kHz sine of 100 uV on every
+#: channel, so the pipeline row's RMS is known in advance (70.7 uV).
+KEPT_STARTS = (125_000, 600_000, 1_050_000)
+
+
+def _keep_windows(shank, *, n_channels=N_CH, uv_per_count=0.1):
+    t = np.arange(36000) / FS
+    sine = 100 * np.sin(2 * np.pi * 2000 * t)
+    counts = np.round(np.tile(sine[:, None], (1, n_channels)) / uv_per_count)
+    np.savez_compressed(shank.directory / N.PIPELINE_FILE,
+                        traces=np.stack([counts] * 3).astype(np.int16),
+                        uv_per_count=uv_per_count,
+                        starts=np.asarray(KEPT_STARTS), margin=3000, fs=FS)
 
 
 @pytest.fixture(scope="module")
 def measured(tmp_path_factory):
     # Three shanks on two probes, and fewer time windows than a real report:
-    # enough for every figure's shape, at a fraction of the processing.
+    # enough for every figure's shape, at a fraction of the processing. The
+    # first kept the pipeline's windows; the others are sorts from before.
     tmp = tmp_path_factory.mktemp("noise")
     shanks = [_Shank(tmp, p, s) for p, s in ((0, 0), (0, 1), (1, 0))]
+    _keep_windows(shanks[0])
     saved = N.N_TIME_WINDOWS
     N.N_TIME_WINDOWS = 3
     try:
@@ -132,6 +150,39 @@ def test_a_shank_is_measured_at_every_stage(measured):
     assert m["rms_over_time_uv"].size == 3
     # Each stage removes something, so RMS only falls from band-pass onwards.
     assert np.median(m["rms_uv"][3]) <= np.median(m["rms_uv"][1])
+
+
+def test_the_pipeline_row_is_what_the_sort_kept(measured):
+    m = measured[0]
+    assert m["pipeline_note"] is None
+    # The kept sine, through the same band-pass as the other rows.
+    np.testing.assert_allclose(m["rms_uv"][4], 100 / np.sqrt(2), rtol=0.02)
+    assert m["snippets"][4].shape == (N.SNIPPET_SAMPLES, N_CH)
+
+
+def test_every_row_is_taken_at_the_pipelines_times(measured):
+    # So the five rows are the same seconds, not five different ones.
+    expected = [(s + FS / 2) / FS for s in KEPT_STARTS]
+    np.testing.assert_allclose(measured[0]["window_times_s"], expected)
+
+
+def test_a_sort_without_the_windows_says_so_and_still_draws(measured):
+    m = measured[1]
+    assert m["rms_uv"][4] is None and m["pooled_db"][4] is None
+    assert "re-run" in m["pipeline_note"]
+    for draw in (N.depth_power_grid, N.snippet_grid):
+        fig = draw(measured)
+        texts = [t.get_text() for a in fig.axes for t in a.texts]
+        assert sum("re-run" in t for t in texts) == 2, "one note per shank without it"
+
+
+def test_windows_for_other_channels_are_refused_not_stretched(tmp_path):
+    shank = _Shank(tmp_path, 0, 0)
+    _keep_windows(shank, n_channels=300)
+    starts, blocks, note = N.pipeline_windows(shank, n_channels=N_CH, fs=FS,
+                                              width=30000, margin=3000)
+    assert starts is None and blocks is None
+    assert "300 channels" in note
 
 
 def test_the_grids_have_a_column_per_shank_and_a_row_per_stage(measured):

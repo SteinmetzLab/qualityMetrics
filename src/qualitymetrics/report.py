@@ -352,7 +352,9 @@ def _noise_detail(result: ReportResult, found, label: str, caveat: str) -> None:
     stages = ("Stages: raw (channel medians removed); band-pass 0.5-10 kHz; "
               "the shank's across-channel median removed (global CAR), then "
               "band-passed; then each simultaneously sampled group's median "
-              "also removed (demux CAR), then band-passed.")
+              "also removed (demux CAR), then band-passed; last, the sorting "
+              "pipeline's own destripe of the same seconds (ADC phase shift, "
+              "spatial high-pass), band-passed likewise, where the sort kept it.")
     spec = [
         ("session_noise_depth_power", noise.depth_power_grid,
          "power by depth and frequency, per stage and shank",
