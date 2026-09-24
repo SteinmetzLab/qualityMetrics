@@ -282,7 +282,11 @@ def build_session_report(session_dir: str | Path, out_dir: str | Path,
 
     if not noise:
         result.skipped["session_rms_across_shanks"] = "not requested"
+        for name in NOISE_FIGURES:
+            result.skipped[name] = "not requested"
         return result
+
+    _noise_detail(result, found, label, caveat)
 
     measured, failures = [], {}
     for shank in found.shanks:
@@ -309,3 +313,69 @@ def build_session_report(session_dir: str | Path, out_dir: str | Path,
     result.made["session_rms_per_shank.csv"] = sessionplots.noise_table(
         measured, out_dir / "session_rms_per_shank.csv")
     return result
+
+
+#: The noise figures ported from the quad-base noise testing (plots/noise.py).
+NOISE_FIGURES = ("session_noise_depth_power", "session_noise_snippets",
+                 "session_noise_rms_by_channel", "session_noise_spectra",
+                 "session_noise_rms_over_time", "session_noise_rms_summary")
+
+
+def _noise_detail(result: ReportResult, found, label: str, caveat: str) -> None:
+    """Measure every shank once, then draw the noise figures from it."""
+    from .plots import noise
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def attempt(shank):
+        try:
+            return noise.measure_shank(shank), None
+        except Exception as exc:  # noqa: BLE001 - one shank must not stop the rest
+            return None, f"{type(exc).__name__}: {exc}"
+
+    # Four shanks at once: the decompression, medians and filters do their
+    # work outside the interpreter lock, and a 16-shank session took 23 min
+    # one shank at a time.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outcomes = list(pool.map(attempt, found.shanks))
+    measured = [m for m, _err in outcomes if m is not None]
+    failures = {s.label: err for s, (_m, err) in zip(found.shanks, outcomes) if err}
+    if not measured:
+        reason = ("; ".join(f"{k}: {v}" for k, v in failures.items())
+                  or "no shank yielded a measurement")
+        for name in NOISE_FIGURES:
+            result.skipped[name] = reason
+        return
+    missing = f"   No measurement: {', '.join(failures)}" if failures else ""
+    windows = (f"1 s each at {', '.join(f'{int(f * 100)}%' for f in noise.WINDOW_FRACTIONS)} "
+               f"of the recording")
+    stages = ("Stages: raw (channel medians removed); band-pass 0.5-10 kHz; "
+              "the shank's across-channel median removed (global CAR), then "
+              "band-passed; then each simultaneously sampled group's median "
+              "also removed (demux CAR), then band-passed.")
+    spec = [
+        ("session_noise_depth_power", noise.depth_power_grid,
+         "power by depth and frequency, per stage and shank",
+         f"{windows}. {stages} Log-frequency bins keep each bin's maximum."),
+        ("session_noise_snippets", noise.snippet_grid,
+         "33 ms of voltage, per stage and shank",
+         f"From the middle window. {stages}"),
+        ("session_noise_rms_by_channel", noise.rms_by_channel,
+         "RMS per channel after each stage",
+         f"{windows}. {stages} Stages overlaid within a shank only."),
+        ("session_noise_spectra", noise.median_spectra,
+         "median spectrum across channels, per stage",
+         f"{windows}. {stages}"),
+        ("session_noise_rms_over_time", noise.rms_over_time,
+         "RMS over the recording, after demux CAR",
+         f"{noise.N_TIME_WINDOWS} windows of 1 s spread across the recording; "
+         "median across channels in each."),
+        ("session_noise_rms_summary", noise.rms_summary,
+         "median RMS per shank, 95% bootstrap CI",
+         f"Median over {noise.N_TIME_WINDOWS} windows of 1 s after demux CAR; "
+         "the CI resamples those windows."),
+    ]
+    for name, draw, what, how in spec:
+        _attempt(result, name, lambda draw=draw, what=what, how=how: draw(
+            measured, title=f"{label}: {what}".strip(),
+            subtitle=f"{how}{missing}{caveat}"))
