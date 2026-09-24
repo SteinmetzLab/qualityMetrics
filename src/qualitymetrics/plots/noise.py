@@ -25,10 +25,11 @@ The four stages, in the order of the original's ``rmsCalcNPQuad``:
 Referencing happens before the filter, not after, deliberately. A median
 across channels is not a linear operation, so taking it after band-passing
 puts power back outside the band: on FD_008 it raised the spectrum below
-500 Hz from the filter's floor to about -35 dB. (Narrow lines near 3.3 and
-4.9 kHz that appear after either CAR are not that: they survive this order
-too, on every shank of every probe of FD_008, and look like a real signal the
-median reference redistributes. Not yet explained.)
+500 Hz from the filter's floor to about -35 dB. (The narrow lines at 3214.4
+and 4790.0 Hz on FD_008 are not that either: they are in the raw data, on
+every channel, about 31 dB over the floor, and no referencing removes them.
+Fixed in frequency across a month and seen only on one rig, so interference
+from equipment rather than anything in the processing.)
 
 A shank is its own column or panel everywhere. Stages are overlaid within a
 shank; shanks are never overlaid on one another, because their channels, depths
@@ -42,7 +43,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..style import DEPTH_LABEL, despine, use_lab_style
+from ..style import DEPTH_LABEL, color_legend, despine, use_lab_style
 
 STAGES = ("Raw", "Band-pass 0.5-10 kHz", "+ Global CAR", "+ Demux CAR")
 STAGE_COLORS = ("#8c8c8c", "#1f77b4", "#2ca02c", "#d62728")
@@ -409,7 +410,7 @@ def rms_by_channel(measured: list[dict], *, title="", subtitle=""):
         ax.tick_params(labelsize=7)
         despine(ax)
     first = where[(measured[0]["probe"], measured[0]["shank"])]
-    first.legend(fontsize=7, frameon=False, loc="best")
+    color_legend(first, fontsize=7, loc="best")
     top = _caption(fig, title, subtitle)
     fig.tight_layout(rect=(0, 0, 1, top))
     return fig
@@ -433,7 +434,7 @@ def median_spectra(measured: list[dict], *, title="", subtitle=""):
         ax.tick_params(labelsize=7)
         despine(ax)
     first = where[(measured[0]["probe"], measured[0]["shank"])]
-    first.legend(fontsize=7, frameon=False, loc="best")
+    color_legend(first, fontsize=7, loc="best")
     top = _caption(fig, title, subtitle)
     fig.tight_layout(rect=(0, 0, 1, top))
     return fig
