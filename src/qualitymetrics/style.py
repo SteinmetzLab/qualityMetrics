@@ -42,6 +42,24 @@ def use_lab_style() -> None:
     })
 
 
+def color_legend(ax, **kw):
+    """A legend whose entries are printed in their series' colors, with no marks.
+
+    For figures where color alone tells the series apart: a sample line in the
+    legend otherwise reads as one more trace inside the axes, and a sample
+    marker as one more data point. Keep marks (use ax.legend) only when they
+    carry something the color does not, such as line style or marker shape.
+    """
+    kw.setdefault("frameon", False)
+    leg = ax.legend(handlelength=0, handletextpad=0, **kw)
+    for text, handle in zip(leg.get_texts(), leg.legend_handles):
+        color = (handle.get_color() if hasattr(handle, "get_color")
+                 else handle.get_facecolor()[0])
+        text.set_color(color)
+        handle.set_visible(False)
+    return leg
+
+
 def despine(ax) -> None:
     """Hide the top and right spines of an axes that was built by hand."""
     ax.spines["top"].set_visible(False)
