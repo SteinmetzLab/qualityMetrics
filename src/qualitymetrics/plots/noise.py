@@ -21,6 +21,15 @@ The four stages, in the order of the original's ``rmsCalcNPQuad``:
    come from the NP2 multiplexing, the same rule the sorting pipeline's ADC
    phase correction uses (see :func:`adc_groups`), rather than a hard-coded
    channel list. Within a shank only, as in the original.
+5. **Pipeline destripe**: what the sorting pipeline itself made of the same
+   seconds: high-pass 300 Hz, ADC phase shift, dead channels interpolated,
+   spatial high-pass, before motion correction. SortingManager keeps those
+   seconds beside the sort (``destriped_windows.npz``) and the three detailed
+   windows are taken at its times, so every row shows the same data. Then the
+   same 0.5-10 kHz band-pass, so it compares with the rows above; Kilosort
+   filters from 300 Hz, so this row shows slightly less than Kilosort sees. A
+   sort from before the file was kept draws the row empty and says so;
+   re-running its quality metrics makes the file.
 
 Referencing happens before the filter, not after, deliberately. A median
 across channels is not a linear operation, so taking it after band-passing
@@ -45,8 +54,11 @@ import numpy as np
 
 from ..style import DEPTH_LABEL, color_legend, despine, use_lab_style
 
-STAGES = ("Raw", "Band-pass 0.5-10 kHz", "+ Global CAR", "+ Demux CAR")
-STAGE_COLORS = ("#8c8c8c", "#1f77b4", "#2ca02c", "#d62728")
+STAGES = ("Raw", "Band-pass 0.5-10 kHz", "+ Global CAR", "+ Demux CAR",
+          "Pipeline destripe")
+STAGE_COLORS = ("#8c8c8c", "#1f77b4", "#2ca02c", "#d62728", "#9467bd")
+#: Written beside the sort by SortingManager's ks4driver.save_destriped_windows.
+PIPELINE_FILE = "destriped_windows.npz"
 BAND_HZ = (500.0, 10_000.0)
 #: Where in the recording the three detailed windows sit (early, middle, late).
 WINDOW_FRACTIONS = (0.1, 0.5, 0.9)
@@ -176,6 +188,36 @@ def _windows(total: int, fs: float, fractions, width: int, margin: int) -> list[
     return starts
 
 
+def pipeline_windows(shank, *, n_channels: int, fs: float, width: int,
+                     margin: int):
+    """The pipeline's destriped windows for this shank, or why there are none.
+
+    Returns ``(starts, blocks_uv, None)`` or ``(None, None, reason)``. Blocks
+    are (samples, channels) microvolts with ``margin`` on either side. Refused
+    rather than stretched to fit when the file does not describe the same
+    channels, rate and window length as the rest of the figure.
+    """
+    path = shank.directory / PIPELINE_FILE
+    if not path.exists():
+        return None, None, "not kept for this sort (re-run its quality metrics)"
+    with np.load(path) as kept:
+        traces = kept["traces"]
+        scale = float(kept["uv_per_count"]) if "uv_per_count" in kept.files else 1.0
+        starts = [int(x) for x in kept["starts"]]
+        kept_margin, kept_fs = int(kept["margin"]), float(kept["fs"])
+    if abs(kept_fs - fs) > 1e-6 * fs:
+        return None, None, f"kept at {kept_fs:g} Hz, recording is {fs:g} Hz"
+    if traces.shape[2] != n_channels:
+        return None, None, (f"kept {traces.shape[2]} channels, the sort has "
+                            f"{n_channels}")
+    if traces.shape[1] != width + 2 * kept_margin or kept_margin < margin:
+        return None, None, "kept windows are not the length drawn here"
+    trim = kept_margin - margin
+    blocks = [np.asarray(t[trim:t.shape[0] - trim], dtype=np.float32) * scale
+              for t in traces]
+    return starts, blocks, None
+
+
 def measure_shank(shank, *, reader_factory=None) -> dict:
     """Everything the noise figures need for one shank, already reduced.
 
@@ -215,11 +257,26 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
                               dtype=np.float32)[:, :n_ap]
             return rows * shank.ks.uv_per_bit
 
-        detail = [processing_stages(read(s), fs, margin=margin)
-                  for s in _windows(total, fs, WINDOW_FRACTIONS, width, margin)]
+        # At the pipeline's own times when it kept any, so all five rows are
+        # the same seconds; it chose them at the same fractions anyway.
+        starts, blocks, pipeline_note = pipeline_windows(
+            shank, n_channels=n_ap, fs=fs, width=width, margin=margin)
+        if starts is None:
+            starts = _windows(total, fs, WINDOW_FRACTIONS, width, margin)
+        detail = []
+        for i, start in enumerate(starts):
+            stages = processing_stages(read(start), fs, margin=margin)
+            stages.append(None if blocks is None
+                          else _band_pass(blocks[i], fs)[margin:margin + width])
+            detail.append(stages)
         freqs = None
         pooled, median_psd, rms = [], [], []
         for stage in range(len(STAGES)):
+            if detail[0][stage] is None:
+                pooled.append(None)
+                median_psd.append(None)
+                rms.append(None)
+                continue
             psd = []
             for window in detail:
                 freqs, p = signal.welch(window[stage], fs=fs, axis=0,
@@ -235,7 +292,9 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
             rms.append(np.sqrt(np.mean(joined.astype(np.float64) ** 2, axis=0)))
         middle = detail[len(detail) // 2]
         snippet_start = max(0, middle[0].shape[0] // 2 - SNIPPET_SAMPLES // 2)
-        snippets = [s[snippet_start:snippet_start + SNIPPET_SAMPLES] for s in middle]
+        snippets = [None if s is None
+                    else s[snippet_start:snippet_start + SNIPPET_SAMPLES]
+                    for s in middle]
 
         times, over_time = [], []
         fractions = np.linspace(0.05, 0.95, N_TIME_WINDOWS)
@@ -256,8 +315,8 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
         "freq_centers": centers, "freqs": freqs[freqs >= FREQ_MIN_HZ],
         "pooled_db": pooled, "median_psd_db": median_psd, "rms_uv": rms,
         "snippets": snippets,
-        "window_times_s": [(s + width / 2) / fs for s in
-                           _windows(total, fs, WINDOW_FRACTIONS, width, margin)],
+        "window_times_s": [(s + width / 2) / fs for s in starts],
+        "pipeline_note": pipeline_note,
         "times_s": np.array(times), "rms_over_time_uv": np.array(over_time),
     }
 
@@ -323,6 +382,22 @@ def _label_grid(ax, row, col, m, *, xlabel):
         ax.tick_params(labelbottom=False)
 
 
+def _missing(ax, m, row, col, *, xlabel):
+    """A stage this shank has no data for: say why, keep the grid's labels."""
+    import textwrap
+
+    note = m.get("pipeline_note") or "no data"
+    # Wrapped by hand: matplotlib's wrap=True wraps at the figure's edge, not
+    # the panel's, and the note ran through the next three panels.
+    ax.text(0.5, 0.5, textwrap.fill(note[:1].upper() + note[1:], 18),
+            transform=ax.transAxes, ha="center", va="center", fontsize=7,
+            color="#555555")
+    _label_grid(ax, row, col, m, xlabel=xlabel)
+    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+
 def depth_power_grid(measured: list[dict], *, title="", subtitle=""):
     """Rows: processing stage. Columns: shank. Depth by log frequency."""
     fig, axes = _grid(len(STAGES), len(measured), sharey=True)
@@ -331,6 +406,9 @@ def depth_power_grid(measured: list[dict], *, title="", subtitle=""):
         f = m["freq_centers"]
         for row in range(len(STAGES)):
             ax = axes[row, col]
+            if m["pooled_db"][row] is None:
+                _missing(ax, m, row, col, xlabel="Frequency (Hz)")
+                continue
             depths, power = by_depth(m["pooled_db"][row], m["depth_um"])
             image = ax.pcolormesh(f, depths, power, shading="nearest",
                                   cmap="viridis", vmin=POWER_LIMITS_DB[0],
@@ -359,6 +437,9 @@ def snippet_grid(measured: list[dict], *, title="", subtitle=""):
         ms = np.arange(m["snippets"][0].shape[0]) / m["fs"] * 1000
         for row in range(len(STAGES)):
             ax = axes[row, col]
+            if m["snippets"][row] is None:
+                _missing(ax, m, row, col, xlabel="Time (ms)")
+                continue
             limit = raw_limit if row == 0 else SNIPPET_LIMITS_UV
             depths, volts = by_depth(m["snippets"][row], m["depth_um"], axis=1)
             image = ax.pcolormesh(ms, depths, volts.T, shading="nearest",
@@ -399,6 +480,8 @@ def rms_by_channel(measured: list[dict], *, title="", subtitle=""):
     for m in measured:
         ax = where[(m["probe"], m["shank"])]
         for stage, color, values in zip(STAGES, STAGE_COLORS, m["rms_uv"]):
+            if values is None:
+                continue
             depths, rms = by_depth(values, m["depth_um"])
             # A dead channel's zero cannot sit on a log axis; 1 uV is below
             # anything a working channel shows.
@@ -423,6 +506,8 @@ def median_spectra(measured: list[dict], *, title="", subtitle=""):
     for m in measured:
         ax = where[(m["probe"], m["shank"])]
         for stage, color, values in zip(STAGES, STAGE_COLORS, m["median_psd_db"]):
+            if values is None:
+                continue
             ax.semilogx(m["freqs"], values, color=color, lw=0.8, label=stage)
         ax.set_xlim(FREQ_MIN_HZ, m["freqs"].max())
         # The band-pass takes the stopband to -120 dB; drawn to there, every
