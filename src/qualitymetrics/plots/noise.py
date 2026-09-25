@@ -22,8 +22,9 @@ The four stages, in the order of the original's ``rmsCalcNPQuad``:
    phase correction uses (see :func:`adc_groups`), rather than a hard-coded
    channel list. Within a shank only, as in the original.
 5. **Pipeline destripe**: what the sorting pipeline itself made of the same
-   seconds: high-pass 300 Hz, ADC phase shift, dead channels interpolated,
-   spatial high-pass, before motion correction. SortingManager keeps those
+   seconds: high-pass 300 Hz, ADC phase shift, from sort v3 each ADC group's
+   median removed, dead channels interpolated, spatial high-pass, before motion
+   correction. Which chain a sort used is in its file (``adc_group_median``). SortingManager keeps those
    seconds beside the sort (``destriped_windows.npz``) and the three detailed
    windows are taken at its times, so every row shows the same data. Then the
    same 0.5-10 kHz band-pass, so it compares with the rows above; Kilosort
