@@ -11,12 +11,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..metrics import noise_cutoff_parts
 from ..style import DEPTH_LABEL, TIME_LABEL, despine, use_lab_style
 
 #: The metric's own constants, repeated here so the drawing and the calculation
 #: cannot drift apart. They match qualitymetrics.metrics.
-N_BINS = 100
-QUANTILE_LENGTH = 0.25
 PERCENT_THRESHOLD = 0.10
 NC_THRESHOLD = 5.0
 
@@ -93,42 +92,6 @@ def depth_power_wide(rec, t_start_s: float = 100.0, win_s: float = 4.0,
     return fig
 
 
-def _noise_cutoff_parts(amps):
-    """Every intermediate the noise cutoff formula uses, for drawing.
-
-    Recomputed here exactly as in metrics.noise_cutoff rather than returned from
-    it, because the metric is vendored verbatim from ibllib and must stay that
-    way. If the two ever disagree the figure is wrong, so the caller checks the
-    reported value against the metric.
-    """
-    amps = np.asarray(amps, dtype=float)
-    edges = np.linspace(0, np.max(amps), N_BINS)
-    n, _ = np.histogram(amps, bins=edges)
-    centres = (edges[:-1] + edges[1:]) / 2
-
-    idx_peak = int(np.argmax(n))
-    length_top_half = len(np.where(n[idx_peak:-1] > 0)[0])
-    start = int(np.ceil(2 * QUANTILE_LENGTH * length_top_half + idx_peak))
-    high_idx = np.arange(start, len(n))
-    used = high_idx[n[high_idx] >= 1] if high_idx.size else high_idx
-
-    parts = {
-        "counts": n, "centres": centres, "edges": edges,
-        "idx_peak": idx_peak, "peak_height": int(np.max(n)) if n.size else 0,
-        "high_start": start, "high_idx": high_idx, "used_idx": used,
-        "mean_high": float(n[used].mean()) if used.size else float("nan"),
-        "std_high": float(n[used].std()) if used.size else float("nan"),
-    }
-    nonzero = n[n != 0]
-    parts["first_low"] = float(nonzero[1]) if nonzero.size > 1 else float("nan")
-    if np.isfinite(parts["std_high"]) and parts["std_high"] > 0:
-        parts["cutoff"] = ((parts["first_low"] - parts["mean_high"])
-                           / parts["std_high"])
-    else:
-        parts["cutoff"] = float("nan")
-    return parts
-
-
 def noise_cutoff_diagnostic(ks, unit_ids=None, n_units: int = 5,
                             time_bins: int = 120, amp_bins: int = 100,
                             title: str | None = None, figsize=None):
@@ -187,7 +150,7 @@ def noise_cutoff_diagnostic(ks, unit_ids=None, n_units: int = 5,
             despine(ax_h)
             continue
 
-        parts = _noise_cutoff_parts(amps)
+        parts = noise_cutoff_parts(amps)
         top = float(np.max(amps))
 
         # -- amplitude against time, as a density

@@ -509,3 +509,25 @@ def label_from_path(path: str | Path) -> str:
             subject = parts[i - 1]
     bits = [b for b in (subject, date, shank) if b]
     return " ".join(bits) if bits else Path(path).name
+
+
+def unit_summary_table(ks, duration_s: float | None = None):
+    """Returns the numbers behind ``amp_depth_scatter``, as one dict per unit.
+
+    Separate from the plotting function, so a caller can get the numbers without
+    drawing a figure. Defined here rather than in ``plots``, so it runs without
+    matplotlib; ``qualitymetrics.plots.units`` re-exports it under the same name.
+    """
+    rates = ks.firing_rate(duration_s)
+    rows = []
+    for u in (int(x) for x in ks.unit_ids):
+        rows.append({
+            "unit_id": u,
+            "n_spikes": ks.n_spikes[u],
+            "firing_rate_sps": rates[u],
+            "amplitude_uv": ks.unit_amplitude_uv[u],
+            "depth_um": ks.unit_depth_um[u],
+            "trough_to_peak_ms": ks.trough_to_peak_ms.get(u, float("nan")),
+            "ks_label": ks.ks_label.get(u, ""),
+        })
+    return rows

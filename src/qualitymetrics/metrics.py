@@ -85,6 +85,55 @@ def noise_cutoff(amps, quantile_length: float = 0.25, n_bins: int = 100,
     return bool(nc_pass), float(cutoff), float(first_low_quantile)
 
 
+def noise_cutoff_parts(amps):
+    """Returns every intermediate value of the noise cutoff calculation.
+
+    ``noise_cutoff`` is vendored verbatim from ibllib and must stay unchanged, so
+    this function repeats its arithmetic instead of making it return these
+    values. If the two disagree, a view drawn from this function is wrong: check
+    the returned ``"cutoff"`` against ``noise_cutoff``.
+
+    The returned dict holds:
+
+    - ``"counts"``, ``"centres"``, ``"edges"``: the amplitude histogram.
+    - ``"idx_peak"``, ``"peak_height"``: the index and count of the peak bin.
+    - ``"high_start"``, ``"high_idx"``, ``"used_idx"``: the upper bins, and the
+      occupied ones among them that the spread is computed from.
+    - ``"mean_high"``, ``"std_high"``: the mean and standard deviation of those
+      counts.
+    - ``"first_low"``: the count in the second occupied bin, which the formula
+      compares against the upper bins.
+    - ``"cutoff"``: the result, in standard deviations.
+    """
+    n_bins, quantile_length = 100, 0.25  # noise_cutoff's defaults
+    amps = np.asarray(amps, dtype=float)
+    edges = np.linspace(0, np.max(amps), n_bins)
+    n, _ = np.histogram(amps, bins=edges)
+    centres = (edges[:-1] + edges[1:]) / 2
+
+    idx_peak = int(np.argmax(n))
+    length_top_half = len(np.where(n[idx_peak:-1] > 0)[0])
+    start = int(np.ceil(2 * quantile_length * length_top_half + idx_peak))
+    high_idx = np.arange(start, len(n))
+    used = high_idx[n[high_idx] >= 1] if high_idx.size else high_idx
+
+    parts = {
+        "counts": n, "centres": centres, "edges": edges,
+        "idx_peak": idx_peak, "peak_height": int(np.max(n)) if n.size else 0,
+        "high_start": start, "high_idx": high_idx, "used_idx": used,
+        "mean_high": float(n[used].mean()) if used.size else float("nan"),
+        "std_high": float(n[used].std()) if used.size else float("nan"),
+    }
+    nonzero = n[n != 0]
+    parts["first_low"] = float(nonzero[1]) if nonzero.size > 1 else float("nan")
+    if np.isfinite(parts["std_high"]) and parts["std_high"] > 0:
+        parts["cutoff"] = ((parts["first_low"] - parts["mean_high"])
+                           / parts["std_high"])
+    else:
+        parts["cutoff"] = float("nan")
+    return parts
+
+
 def noise_cutoff_per_unit(spike_clusters, spike_amplitudes_uv,
                           unit_ids=None) -> dict[int, dict]:
     """Run noise_cutoff for every unit. Amplitudes in microvolts."""
