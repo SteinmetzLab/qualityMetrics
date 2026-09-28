@@ -60,12 +60,11 @@ def test_waveform_rows_keep_whitespace_between_channels(rec, ks):
 def test_noise_cutoff_diagnostic_redraws_the_metric_faithfully(ks):
     """The figure recomputes the intermediates; they must match the metric.
 
-    metrics.noise_cutoff is vendored verbatim from ibllib and must stay that
-    way, so the drawing keeps its own copy of the arithmetic. If the two drift
+    ``metrics.noise_cutoff`` is vendored verbatim from ibllib and must stay that
+    way, so ``noise_cutoff_parts`` repeats its arithmetic. If the two drift
     apart, the picture is of a different calculation than the number beside it.
     """
-    from qualitymetrics.metrics import noise_cutoff
-    from qualitymetrics.plots.diagnostics import _noise_cutoff_parts
+    from qualitymetrics.metrics import noise_cutoff, noise_cutoff_parts
 
     amps = ks.spike_amplitudes_uv()
     checked = 0
@@ -74,12 +73,27 @@ def test_noise_cutoff_diagnostic_redraws_the_metric_faithfully(ks):
         if mine.size < 50:
             continue
         _passed, cutoff, first_low = noise_cutoff(mine)
-        parts = _noise_cutoff_parts(mine)
+        parts = noise_cutoff_parts(mine)
         if np.isfinite(cutoff):
             assert parts["cutoff"] == pytest.approx(cutoff, rel=1e-9)
             assert parts["first_low"] == pytest.approx(first_low, rel=1e-9)
             checked += 1
     assert checked > 0, "no unit was actually compared"
+
+
+def test_noise_cutoff_parts_uses_the_metrics_defaults():
+    """``noise_cutoff_parts`` hardcodes ``n_bins=100`` and ``quantile_length=0.25``.
+
+    ``noise_cutoff`` is vendored verbatim, so its defaults can't refer to a shared
+    constant. If they change, update ``noise_cutoff_parts`` to match.
+    """
+    import inspect
+
+    from qualitymetrics.metrics import noise_cutoff
+
+    defaults = inspect.signature(noise_cutoff).parameters
+    assert defaults["n_bins"].default == 100
+    assert defaults["quantile_length"].default == 0.25
 
 
 def test_noise_cutoff_diagnostic_builds_and_labels_its_pieces(ks):

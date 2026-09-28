@@ -20,9 +20,8 @@ from .metrics import (
                       write_phy_metrics,
 )
 from .raw import Geometry, RawError, RawRecording, find_band, parse_meta
-from .style import use_lab_style
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 __all__ = [
     "Geometry", "KilosortResults", "KsError", "RawError", "RawRecording",
@@ -30,3 +29,13 @@ __all__ = [
     "parse_meta", "sliding_rp", "use_lab_style", "write_cluster_tsv",
     "write_phy_metrics",
 ]
+
+
+def __getattr__(name):
+    # Imported on first access, not at the top: ``style`` imports matplotlib,
+    # and the calculations must work without it (``tests/test_compute_api.py``).
+    if name == "use_lab_style":
+        from .style import use_lab_style
+
+        return use_lab_style
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

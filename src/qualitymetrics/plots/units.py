@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..ksdata import unit_summary_table  # noqa: F401  Moved to ``ksdata``; re-exported.
 from ..style import AMP_LABEL, DEPTH_LABEL, despine, size_legend, use_lab_style
 
 #: Marker areas for a unit that passed quality control and one that did not.
@@ -87,27 +88,6 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
                  fontsize=12)
     fig.tight_layout()
     return fig
-
-
-def unit_summary_table(ks, duration_s: float | None = None):
-    """The numbers behind amp_depth_scatter, as a list of dicts.
-
-    Useful on its own, and it keeps the plotting function free of anything a
-    caller might want without a figure.
-    """
-    rates = ks.firing_rate(duration_s)
-    rows = []
-    for u in (int(x) for x in ks.unit_ids):
-        rows.append({
-            "unit_id": u,
-            "n_spikes": ks.n_spikes[u],
-            "firing_rate_sps": rates[u],
-            "amplitude_uv": ks.unit_amplitude_uv[u],
-            "depth_um": ks.unit_depth_um[u],
-            "trough_to_peak_ms": ks.trough_to_peak_ms.get(u, float("nan")),
-            "ks_label": ks.ks_label.get(u, ""),
-        })
-    return rows
 
 
 def templates_grid(ks, unit_ids=None, n_channels: int = 8, n_cols: int = 6,
