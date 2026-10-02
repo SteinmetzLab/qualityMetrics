@@ -131,6 +131,20 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             # not so late that a short recording has nothing there.
             t_start_s = (duration or ks.duration_s) / 3.0
 
+        # ---- saturation: counts made by SortingManager's worker, if present.
+        # Positions travel in the counts file, not from the sort, which drops
+        # the channels above a brain edge.
+        from .plots.saturation import SATURATION_FILE, load_counts
+        if not (Path(sorting_dir) / SATURATION_FILE).exists():
+            result.skipped["saturation"] = ("no saturation.npz in the sort folder (SortingManager's "
+                                            "worker counts saturation during its LFP pass; sorts "
+                                            "made before 2026-10 have none)")
+        else:
+            # Loading inside the attempt, so a damaged file costs this figure only.
+            _attempt(result, "saturation", lambda: plots.saturation_report(
+                load_counts(sorting_dir),
+                title=f"{label_from_path(sorting_dir)}: samples at the ADC's rails"))
+
         # ---- sorter-only figures
         if scale is None:
             reason = ("no recording meta found, so microvolts are unknown; "
