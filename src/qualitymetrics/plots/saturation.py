@@ -11,6 +11,11 @@ The counts are made by SortingManager's worker while it reads every raw sample
 for the LFP (sortingmanager/saturation.py) and saved as saturation.npz in the
 sort folder: per channel, samples at the negative and positive rail and the
 number of separate events; and per second, saturated samples per channel.
+
+Since 2026-10-05 the worker finds each shank's rail in the data (rail_bits; one
+code per shank, the same on every channel) instead of assuming 0.97 x imMaxInt,
+which lay above the rail on many probes and counted nothing there. Files made
+before carry only threshold_bits, the assumed threshold, and say so here.
 """
 from __future__ import annotations
 
@@ -89,20 +94,41 @@ def saturation_report(counts: dict, title: str | None = None, figsize=(12, 8)):
     else:
         ax1.set_xlabel("Channel")
     seconds = total / fs
-    pinned = np.flatnonzero(total >= 0.9 * n_samples) if n_samples else np.zeros(0, int)
+    if "pinned" in counts:                  # from the worker, which saw every sample
+        pinned = np.asarray(counts["pinned"], int)
+    else:
+        pinned = np.flatnonzero(total >= 0.9 * n_samples) if n_samples else np.zeros(0, int)
     note = (f"{int((total > 0).sum())} of {n_ch} channels saturated at some point; "
             f"{seconds.sum():.3f} channel-seconds in all ({total.sum() / max(1, n_samples * n_ch) * 100:.4f}% of samples)")
     if pinned.size:
-        note += f"; pinned at the rail throughout (dead): {pinned.tolist()}"
+        note += f"; pinned throughout (dead): {pinned.tolist()}"
     if "events" in counts:
         note += f"; {int(np.asarray(counts['events']).sum())} separate events"
+    detected = "rail_bits" in counts
+    rail = float(counts["rail_bits"]) if detected else float(counts.get("threshold_bits", np.nan))
     if not total.any():
-        note = "No sample reached the ADC's rails on any channel"
+        note = ("No rail found: no channel held an extreme value" if detected
+                else "No sample reached the assumed threshold on any channel")
+    if detected and np.isfinite(rail):
+        line = f"Rail +/-{rail:.0f} ADC counts, found in the data"
+    elif detected:
+        # Without a rail, a channel touching it only briefly cannot be told from noise.
+        line = "No rail found; a brief touch of a rail on one channel would not show"
+    else:
+        # Made before the rail was detected: the threshold was assumed, and lay
+        # above the rail on many probes, so a zero here may hide saturation.
+        line = f"Assumed threshold +/-{rail:.0f} ADC counts (older count; may miss a lower rail)"
     if "minimum" in counts and "maximum" in counts:
-        # The threshold assumes where the rails are; the extremes show whether
-        # the data ever got there, so a zero here cannot hide a lower rail.
-        note += (f"\nThreshold +/-{float(counts['threshold_bits']):.0f} bits; most extreme raw "
-                 f"values {int(np.min(counts['minimum']))} and {int(np.max(counts['maximum']))} bits")
+        line += (f"; most extreme raw values {int(np.min(counts['minimum']))} and "
+                 f"{int(np.max(counts['maximum']))} ADC counts")
+    for key, what in (("disagreeing", "hold a different rail"),
+                      ("held_below_band", "hold an extreme below the band"),
+                      ("beyond_rail", "have samples beyond the rail")):
+        if key in counts and np.asarray(counts[key]).size:
+            chans = np.asarray(counts[key]).tolist()
+            shown = ", ".join(map(str, chans[:8])) + (f" and {len(chans) - 8} more" if len(chans) > 8 else "")
+            line += f"; channels {shown} {what}"
+    note += "\n" + line
     ax1.set_title(note, fontsize=9)
     if total.any():
         color_legend(ax1, loc="upper right", fontsize=8)

@@ -96,3 +96,25 @@ def test_a_damaged_counts_file_costs_only_the_saturation_figure(tmp_path, sorter
     result = build_report(tmp_path, tmp_path / "qc", write_phy=False, example_units=2)
     assert "saturation" in result.skipped and "saturation" not in result.made
     assert result.made, "the other figures must still be made"
+
+
+def test_a_detected_rail_is_named_and_an_assumed_threshold_is_flagged():
+    detected = dict(_counts(), rail_bits=np.float64(1955.0), disagreeing=np.array([4]),
+                    held_below_band=np.array([], int), minimum=np.full(16, -1955),
+                    maximum=np.full(16, 1955))
+    title = plots.saturation_report(detected).axes[0].get_title()
+    assert "Rail +/-1955 ADC counts, found in the data" in title and "channels 4 hold a different rail" in title
+    old = dict(_counts(), minimum=np.full(16, -1955), maximum=np.full(16, 1955))
+    assert "Assumed threshold" in plots.saturation_report(old).axes[0].get_title()
+
+
+def test_no_rail_found_says_so():
+    none = dict(_counts(saturated=False), rail_bits=np.float64(np.nan))
+    title = plots.saturation_report(none).axes[0].get_title()
+    assert "No rail found: no channel held an extreme value" in title and "brief touch" in title
+
+
+def test_long_channel_lists_are_shortened_in_the_title():
+    many = dict(_counts(), rail_bits=np.float64(1999.0), disagreeing=np.arange(20))
+    title = plots.saturation_report(many).axes[0].get_title()
+    assert "and 12 more hold a different rail" in title
