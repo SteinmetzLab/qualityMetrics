@@ -214,12 +214,12 @@ class RawRecording:
 
     # -- data --------------------------------------------------------------
 
-    def get_traces(self, t0: float, t1: float, channels=None,
-                   unit: str = "uV") -> np.ndarray:
-        """Pull the half-open window [t0, t1) seconds as (samples, channels).
+    def sample_range(self, t0: float, t1: float) -> tuple[int, int]:
+        """The half-open span of samples that get_traces(t0, t1) returns.
 
-        Returns microvolts by default. unit='int16' returns the stored integers,
-        which is what a checksum or a saturation test wants.
+        Separate so that anything drawn beside a get_traces window (another
+        copy of the same moment, say) can index exactly the same samples
+        rather than repeating the rounding.
         """
         if t1 <= t0:
             raise ValueError(f"empty window: t0={t0} t1={t1}")
@@ -228,6 +228,16 @@ class RawRecording:
         if i1 <= i0:
             raise ValueError(f"window {t0}-{t1} s lies outside this "
                              f"{self.duration_s:.1f} s recording")
+        return i0, i1
+
+    def get_traces(self, t0: float, t1: float, channels=None,
+                   unit: str = "uV") -> np.ndarray:
+        """Pull the half-open window [t0, t1) seconds as (samples, channels).
+
+        Returns microvolts by default. unit='int16' returns the stored integers,
+        which is what a checksum or a saturation test wants.
+        """
+        i0, i1 = self.sample_range(t0, t1)
         if channels is None:
             channels = np.arange(self.n_data_channels)
         channels = np.asarray(channels, dtype=int)

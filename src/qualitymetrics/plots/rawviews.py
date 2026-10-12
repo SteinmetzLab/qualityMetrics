@@ -10,6 +10,8 @@ per-channel DC offset, which on our data is 1100 uV against spikes of 70.
 """
 from __future__ import annotations
 
+import textwrap
+
 import numpy as np
 
 from ..preproc import destripe as ibl_destripe
@@ -48,15 +50,118 @@ def _filtered_window(rec, t_start_s, win_ms, highpass_hz, cmr, channels):
     return full[:, np.asarray(channels, dtype=int)]
 
 
+#: Row labels of the two-row wall_heatmap.
+RAW_ROW_LABEL = "Raw archive"
+SORTED_ROW_LABEL = "As sorted"
+
+
+def _as_sorted_panels(rec, cleaned, order, spans):
+    """The pipeline's own samples at the raw panels' times, in depth order.
+
+    Returns ``(panels, reason)``. ``panels`` has one entry per span: a
+    (samples, len(order)) microvolt array whose column k is channel
+    ``order[k]``, NaN where the sort did not use that channel; or None where
+    no kept window covers the span. ``panels`` is None, with the reason, when
+    nothing can be drawn at all.
+
+    Placed by channel index, through ``cleaned.channels``, never by column
+    position: the file leaves out channels (above the brain edge, listed), and
+    stacking what remains would slide every channel above a gap to the wrong
+    depth.
+    """
+    if cleaned is None:
+        return None, None
+    if abs(cleaned.fs - rec.fs) > 1e-6 * rec.fs:
+        return None, (f"its windows were kept at {cleaned.fs:g} Hz and this "
+                      f"recording is {rec.fs:g} Hz")
+    channels, why = _recording_channels(rec, cleaned)
+    if channels is None:
+        return None, why
+    n = len(order)
+    if channels.min() < 0 or channels.max() >= n:
+        return None, (f"its file names channels up to {channels.max()} "
+                      f"and this recording has {n}")
+    column_of = np.empty(n, dtype=np.int64)
+    column_of[np.asarray(order, dtype=np.int64)] = np.arange(n)
+    columns = column_of[channels]
+
+    panels = []
+    for i0, i1 in spans:
+        block = cleaned.samples_uv(i0, i1)
+        if block is None:
+            panels.append(None)
+            continue
+        full = np.full((i1 - i0, n), np.nan, dtype=np.float32)
+        full[:, columns] = block
+        panels.append(full)
+    if all(p is None for p in panels):
+        kept = ", ".join(f"{lo / rec.fs:.1f}-{hi / rec.fs:.1f} s"
+                         for lo, hi in (cleaned.core(w)
+                                        for w in range(cleaned.n_windows)))
+        return None, f"none of these windows lies inside the seconds the sort kept ({kept})"
+    return panels, None
+
+
+def _recording_channels(rec, cleaned):
+    """The recording's channel index of each column of the kept windows.
+
+    Returns ``(indices, None)`` or ``(None, reason)``. A single-shank sort
+    names channels by file column, which the loader has already turned into
+    indices. A probe-wide sort names them ``AP<n>``, the channel as acquired;
+    the shank file's ``~snsChanMap`` gives the ``AP<n>`` of each of its
+    columns (as SortingManager's ``probesource.ap_hardware_channels`` reads
+    it), so the names are mapped through that rather than guessed.
+    """
+    import re
+
+    from ..raw import paren_entries
+
+    if cleaned.channels is not None:
+        return cleaned.channels, None
+    if cleaned.channel_names is None:
+        return None, ("its file names no channels (no channel_ids), so its "
+                      "columns cannot be placed at depths")
+    acquired = [re.match(r"^AP(\d+);", entry) for entry
+                in paren_entries(rec.meta.get("~snsChanMap", ""))[1:]]
+    acquired = [int(m.group(1)) for m in acquired if m]
+    if len(acquired) != rec.n_data_channels:
+        return None, ("its channels are named by acquired channel (AP<n>) and "
+                      "this recording's meta has no ~snsChanMap to place them")
+    column_of = {f"AP{h}": i for i, h in enumerate(acquired)}
+    unknown = [name for name in cleaned.channel_names if name not in column_of]
+    if unknown:
+        return None, (f"{len(unknown)} of its channels ({', '.join(unknown[:3])}"
+                      f"{', ...' if len(unknown) > 3 else ''}) are not in this "
+                      "recording")
+    return np.array([column_of[name] for name in cleaned.channel_names],
+                    dtype=np.int64), None
+
+
+def _describe_sorted(cleaned, light_events=None) -> str:
+    """What the bottom row holds, in the sort's own words where it gave them."""
+    # SortingManager's description ends with a note on units after a semicolon,
+    # which belongs in the file, not on the figure.
+    how = cleaned.description.split(";")[0].strip() if cleaned.description else ""
+    how = how or "the pipeline's destripe, before motion correction"
+    if cleaned.light_artifacts_removed:
+        how += ", light artifacts removed"
+    elif cleaned.light_artifacts_removed is False and light_events is not None:
+        # Only worth saying where there were pulses: every sort without them
+        # records applied=False too.
+        how += ", light artifacts NOT removed"
+    return how
+
+
 def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
                  highpass_hz: float | None = 300.0, cmr: bool = True,
                  destripe: bool = False,
                  clim_uv: float | None = None, clim_pct: float = 99.5,
                  artifact_z_um: float | None = None, title: str | None = None,
-                 figsize=(15, 8)):
+                 figsize=None, cleaned=None, light_events=None,
+                 note: str | None = None):
     """Voltage across the whole shank at three moments in the session.
 
-    Depth on y, time on x, voltage as a diverging colour centred on zero, so a
+    Depth on y, time on x, voltage as a diverging color centered on zero, so a
     spike is a dark spot and a bad channel is a stripe. This is the fastest way
     to see dead channels, a saturating amplifier, or line noise, and it is the
     figure to look at before trusting anything downstream.
@@ -66,9 +171,24 @@ def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
     dead in all three; an artifact that appears only in the last panel is a
     different problem with a different cause.
 
-    All panels share one colour scale, computed from the three together. Letting
+    All panels share one color scale, computed from them all together. Letting
     each autoscale would make them individually prettier and mutually
     incomparable, which defeats the point of showing three.
+
+    ``cleaned`` is the sort's
+    :class:`~qualitymetrics.pipelinefiles.DestripedWindows`
+    (``load_destriped_windows(sort_dir)``). Given it, a second row shows the
+    same samples as Kilosort received them, on the same depth axis and the
+    same color scale. The raw row alone has misled: on a light-stimulation
+    session a laser artifact in it was taken for a residual of the artifact
+    removal. A window the sort did not keep is left blank and says so; when
+    none is kept, or the file does not fit this recording, the figure is the
+    raw row alone with the reason underneath. Channels the sort did not use
+    are gray in that row.
+
+    ``light_events`` (``load_light_events(sort_dir)``) marks each laser onset
+    and offset inside a window with a dotted line, in both rows. ``note`` is
+    printed under the figure, for a caller to say why there is no second row.
     """
     import matplotlib.pyplot as plt
     use_lab_style()
@@ -77,6 +197,8 @@ def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
     if t_starts_s is None:
         # 10%, 50% and 90% through, so the first window clears any settling
         # transient and the last is not truncated by the end of the file.
+        # These lie inside the seconds SortingManager keeps (centered on the
+        # same fractions); _as_sorted_panels checks that rather than assuming.
         span = max(rec.duration_s - win_ms / 1000.0, 0.0)
         t_starts_s = [span * f for f in (0.10, 0.50, 0.90)]
     elif np.isscalar(t_starts_s):
@@ -85,42 +207,105 @@ def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
 
     panels = []
     for t0 in t_starts_s:
+        t1 = t0 + win_ms / 1000.0
+        # The exact samples get_traces returns, so the as-sorted row is cut
+        # from the same ones.
+        i0, i1 = rec.sample_range(t0, t1)
         if destripe:
             # Destriping needs every channel in probe order, because it corrects
             # ADC sampling skew and filters across the array; handing it a
             # depth-sorted subset would scramble both. Sort into depth order
             # afterwards instead.
-            full = rec.get_traces(t0, t0 + win_ms / 1000.0)
+            full = rec.get_traces(t0, t1)
             traces = ibl_destripe(full, rec.fs, geometry=rec.geometry)[:, order]
         else:
-            traces = rec.get_traces(t0, t0 + win_ms / 1000.0, channels=order)
+            traces = rec.get_traces(t0, t1, channels=order)
             if highpass_hz:
                 traces = preprocess_ap(traces, rec.fs, highpass_hz, cmr=cmr)
-        panels.append((t0, traces))
+        panels.append((t0, i0, i1, traces))
+
+    sorted_panels, why_not = _as_sorted_panels(
+        rec, cleaned, order, [(i0, i1) for _t, i0, i1, _x in panels])
+    edges = [[] if light_events is None
+             else light_events.edges_between(i0 / rec.fs, i1 / rec.fs)
+             for _t, i0, i1, _x in panels]
+    notes = []
+    if any(edges):
+        # The pulse times come from the behavior rig's clock mapped onto the
+        # probe's, good to about a millisecond; on FD_013 the artifact led the
+        # recorded onset by about 0.7 ms. Say so, or a mark beside the
+        # artifact rather than on it reads as a misalignment.
+        notes.append("Dotted lines: laser onsets and offsets as recorded "
+                     "(light_events.npz); the artifact itself can lead or "
+                     "lag them by about a millisecond.")
+    if note:
+        notes.append(note)
+    if why_not:
+        notes.append(f"No as-sorted row: {why_not}.")
 
     if clim_uv is None:
-        pooled = np.concatenate([np.abs(p).ravel() for _t, p in panels])
-        clim_uv = float(np.percentile(pooled, clim_pct)) or 1.0
+        pooled = [np.abs(p).ravel() for *_rest, p in panels]
+        pooled += [np.abs(p[np.isfinite(p)]) for p in (sorted_panels or ())
+                   if p is not None]
+        clim_uv = float(np.percentile(np.concatenate(pooled), clim_pct)) or 1.0
 
-    fig, axes = plt.subplots(1, len(panels), figsize=figsize, sharey=True,
-                             squeeze=False)
-    axes = axes[0]
-    for ax, (t0, traces) in zip(axes, panels, strict=True):
-        im = ax.imshow(traces.T, aspect="auto", origin="lower", cmap="RdBu_r",
-                       vmin=-clim_uv, vmax=clim_uv,
-                       extent=[0, win_ms, depths.min(), depths.max()],
-                       interpolation="nearest")
-        ax.set_xlabel("Time from window start (ms)")
-        despine(ax)
-        ax.set_title(f"{t0:.0f} s ({t0 / rec.duration_s * 100:.0f}% in)")
-        if artifact_z_um is not None and np.isfinite(artifact_z_um) \
-                and artifact_z_um < depths.max():
-            ax.axhline(artifact_z_um, color="0.2", lw=1.0, ls="--")
-            ax.text(win_ms, artifact_z_um, f" Above {artifact_z_um:.0f} µm ",
-                    ha="right", va="bottom", fontsize=8, color="0.2")
-    axes[0].set_ylabel(DEPTH_LABEL)
+    n_rows = 1 if sorted_panels is None else 2
+    if figsize is None:
+        figsize = (15, 8) if n_rows == 1 else (15, 13)
+    fig, axes = plt.subplots(n_rows, len(panels), figsize=figsize, sharex="col",
+                             sharey=True, squeeze=False)
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("0.8")            # channels the sort did not use
+    half_ms = 500.0 / rec.fs       # half a sample
 
-    cbar = fig.colorbar(im, ax=axes, pad=0.02, fraction=0.03)
+    for col, (t0, i0, i1, traces) in enumerate(panels):
+        column = axes[:, col]
+        # Pixel centers on the sample times, measured from the window's first
+        # sample, so a mark at a known time lands on its own column of pixels.
+        extent = [-half_ms, (i1 - i0) * 1000.0 / rec.fs - half_ms,
+                  depths.min(), depths.max()]
+        shown = [traces] + ([sorted_panels[col]] if n_rows == 2 else [])
+        for ax, image in zip(column, shown, strict=True):
+            if image is None:
+                ax.text(0.5, 0.5, "Not among the seconds\nthe sort kept",
+                        transform=ax.transAxes, ha="center", va="center",
+                        fontsize=10, color="0.3")
+                continue
+            im = ax.imshow(image.T, aspect="auto", origin="lower", cmap=cmap,
+                           vmin=-clim_uv, vmax=clim_uv, extent=extent,
+                           interpolation="nearest")
+        column[0].set_title(f"{t0:.0f} s ({t0 / rec.duration_s * 100:.0f}% in)")
+        column[-1].set_xlabel("Time from window start (ms)")
+        column[-1].set_xlim(extent[0], extent[1])
+
+        for row, ax in enumerate(column):
+            despine(ax)
+            for kind, t in edges[col]:
+                x = (t - i0 / rec.fs) * 1000.0
+                ax.axvline(x, color="k", lw=0.9, ls=":")
+                if row == 0:
+                    ax.text(x, 0.99, f" Laser {kind}",
+                            transform=ax.get_xaxis_transform(), ha="left",
+                            va="top", fontsize=8,
+                            bbox={"facecolor": "white", "alpha": 0.7,
+                                  "edgecolor": "none", "pad": 1})
+            if artifact_z_um is not None and np.isfinite(artifact_z_um) \
+                    and artifact_z_um < depths.max():
+                ax.axhline(artifact_z_um, color="0.2", lw=1.0, ls="--")
+                ax.text(extent[1], artifact_z_um,
+                        f" Above {artifact_z_um:.0f} µm ",
+                        ha="right", va="bottom", fontsize=8, color="0.2")
+
+    for row in range(n_rows):
+        axes[row, 0].set_ylabel(DEPTH_LABEL)
+        if n_rows == 2:
+            axes[row, 0].annotate(
+                (RAW_ROW_LABEL, SORTED_ROW_LABEL)[row], xy=(0, 0.5),
+                xycoords="axes fraction", xytext=(-62, 0),
+                textcoords="offset points", rotation=90, ha="center",
+                va="center", fontsize=12, fontweight="bold")
+
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), pad=0.02, fraction=0.03)
     cbar.set_label("Voltage (µV)")
 
     if destripe:
@@ -130,8 +315,23 @@ def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
                 else "wideband")
         how = band + (", common median referenced" if (highpass_hz and cmr)
                       else "")
-    fig.suptitle(title or f"{rec.path.name}: {win_ms:.0f} ms windows "
-                          f"({how}, shared color scale)", fontsize=12)
+    if title is None:
+        title = f"{rec.path.name}: {win_ms:.0f} ms windows"
+        if n_rows == 1:
+            title += f" ({how}, shared color scale)"
+        else:
+            gray = (" Gray rows: channels it did not sort."
+                    if any(p is not None and np.isnan(p).any()
+                           for p in sorted_panels) else "")
+            sorted_how = textwrap.fill(
+                f"{SORTED_ROW_LABEL}: what Kilosort received, "
+                f"{_describe_sorted(cleaned, light_events)}.{gray}", width=150)
+            title += (f", shared color scale\n{RAW_ROW_LABEL}: {how}.\n"
+                      f"{sorted_how}")
+    fig.suptitle(title, fontsize=12)
+    if notes:
+        fig.text(0.01, 0.005, "  ".join(notes), ha="left", va="bottom",
+                 fontsize=9, color="0.25", wrap=True)
     return fig
 
 

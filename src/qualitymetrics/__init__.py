@@ -21,7 +21,7 @@ from .metrics import (
 )
 from .raw import Geometry, RawError, RawRecording, find_band, parse_meta
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 __all__ = [
     "Geometry", "KilosortResults", "KsError", "RawError", "RawRecording",
