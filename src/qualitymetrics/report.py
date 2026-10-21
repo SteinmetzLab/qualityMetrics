@@ -102,6 +102,17 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
     out_dir.mkdir(parents=True, exist_ok=True)
     result = ReportResult(out_dir=out_dir)
 
+    # Independent of raw traces, amplitude calibration, and template loading.
+    # A failed diagnostic must never stop the rest of this shank's report.
+    from .tracking import write as write_tracking
+    try:
+        tracking = write_tracking(sorting_dir, out_dir, label=label_from_path(sorting_dir))
+        result.made["tracking_continuity"] = str(out_dir / tracking["made"][0])
+        for name in tracking["made"][1:]:
+            result.made[name] = str(out_dir / name)
+    except Exception as exc:  # noqa: BLE001 - keep other figures available
+        result.skipped["tracking_continuity"] = f"{type(exc).__name__}: {exc}"
+
     sorter_output = find_sorter_output(sorting_dir)
     if raw_path is None:
         raw_path = find_recording(sorting_dir, "ap")

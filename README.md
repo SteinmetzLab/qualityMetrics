@@ -155,3 +155,39 @@ no title is hardcoded, that a censored metric does not silently vanish.
 [ibllib](https://github.com/int-brain-lab/ibllib) (International Brain
 Laboratory, MIT licence), unchanged, because importing it would pull ONE, Alyx
 and pandas in for thirty lines of numpy.
+# Firing continuity (2.2)
+
+The per-shank report now adds `tracking_continuity.png`: all sorted clusters,
+candidates first, then appearance/disappearance and selected split time.
+Rows are not cluster IDs. Rates are divided by each unit's 95th percentile
+(maximum if that is zero), clipped at one; unavailable bins are gray.
+
+This is a descriptive tracking-loss screen, not a significance test and not
+a unit-label rule. Ten-second bins are tested at every eligible split, with
+at least 600 elapsed seconds and 300 valid seconds per side. Candidates need
+an active-side mean of at least 1 spikes/s, quiet/active mean at most 0.1,
+and at least 80% of bins on each side respectively above/below 20% of the
+active mean. The best qualifying split maximizes two-rate Poisson gain.
+Biological rate changes can also qualify. Short or unassessable records are
+marked explicitly rather than counted as stable.
+
+Acquisition duration must be provided in `provenance.json` (`duration_s`),
+never inferred from the last spike. `qualitymetrics.tracking.write` also
+accepts an explicit `duration_s` for externally sorted data. Optional
+`light_events.npz` (`onset_s`, `offset_s`, padded by 0.3 s) and
+`mask_intervals.csv` (`start_s`, `stop_s`) beside the sort are excluded from
+both spike counts and exposure. No sidecars means full-recording rates;
+the figure states this. Bins with less than 5 valid seconds are missing.
+
+The same folder receives `tracking_continuity_units.csv` (plot row, cluster
+ID, KS label, split, flags and scores), `tracking_continuity_bins.npz`
+(cluster IDs, counts, exposure, bin edges and plot order), and
+`tracking_continuity.json` (parameters, exclusions and input fingerprints).
+The final bin includes the exact acquisition endpoint, as in NumPy's
+histogram convention. No source arrays or unit labels are changed.
+An endpoint spike follows the final sample's mask, including masks reaching
+the end of acquisition.
+Outputs are staged together. A failed redraw removes earlier continuity
+outputs and records `tracking_continuity_error.json`, so stale results are
+not presented as current; locked files that cannot be removed are named in
+that failure manifest. Other QC figures continue.
