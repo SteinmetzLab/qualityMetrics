@@ -13,6 +13,12 @@ from pathlib import Path
 from . import plots
 from .ksdata import KilosortResults, label_from_path
 from .metrics import phy_metrics_from_results
+from .pipelinefiles import (
+    LIGHT_EVENTS_FILE,
+    PIPELINE_FILE,
+    load_destriped_windows,
+    load_light_events,
+)
 from .raw import RawError, RawRecording, find_band, parse_meta, uv_per_bit
 from .style import save
 
@@ -195,8 +201,8 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                          "example_neurons"):
                 result.skipped[name] = reason
         else:
-            _attempt(result, "wall_heatmap", lambda: plots.wall_heatmap(
-                rec, artifact_z_um=artifact_z_um))
+            _attempt(result, "wall_heatmap", lambda: _wall_heatmap(
+                rec, sorting_dir, artifact_z_um))
             _attempt(result, "raw_traces",
                      lambda: plots.raw_traces(rec, t_start_s=t_start_s))
             _attempt(result, "raw_with_spikes", lambda: plots.raw_with_spikes(
@@ -244,6 +250,32 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                 r.close()
 
     return result
+
+
+def _wall_heatmap(rec, sorting_dir: Path, artifact_z_um: float | None):
+    """The wall heatmap, with the as-sorted row when the sort kept its windows.
+
+    The pipeline's files are read here rather than inside the attempt's figure
+    call, so a damaged one costs the second row, not the raw figure: the
+    figure then says why the row is missing instead of being absent itself.
+    """
+    cleaned, light, notes = None, None, []
+    try:
+        cleaned = load_destriped_windows(sorting_dir)
+        if cleaned is None:
+            notes.append(f"No as-sorted row: no {PIPELINE_FILE} in the sort "
+                         "folder (re-running the sort's quality metrics in "
+                         "SortingManager makes it).")
+    except Exception as exc:  # noqa: BLE001 - the raw row is still worth having
+        notes.append(f"No as-sorted row: {PIPELINE_FILE} unreadable "
+                     f"({type(exc).__name__}: {exc}).")
+    try:
+        light = load_light_events(sorting_dir)
+    except Exception as exc:  # noqa: BLE001 - the marks are not worth the figure
+        notes.append(f"Laser edges not marked: {LIGHT_EVENTS_FILE} unreadable "
+                     f"({type(exc).__name__}: {exc}).")
+    return plots.wall_heatmap(rec, artifact_z_um=artifact_z_um, cleaned=cleaned,
+                              light_events=light, note="  ".join(notes) or None)
 
 
 def _biggest_units(ks: KilosortResults, n: int) -> list[int]:

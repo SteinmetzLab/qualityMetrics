@@ -53,13 +53,13 @@ from __future__ import annotations
 
 import numpy as np
 
+# PIPELINE_FILE is re-exported: it was defined here before pipelinefiles existed.
+from ..pipelinefiles import PIPELINE_FILE, load_destriped_windows  # noqa: F401
 from ..style import DEPTH_LABEL, color_legend, despine, use_lab_style
 
 STAGES = ("Raw", "Band-pass 0.5-10 kHz", "+ Global CAR", "+ Demux CAR",
           "Pipeline destripe")
 STAGE_COLORS = ("#8c8c8c", "#1f77b4", "#2ca02c", "#d62728", "#9467bd")
-#: Written beside the sort by SortingManager's ks4driver.save_destriped_windows.
-PIPELINE_FILE = "destriped_windows.npz"
 BAND_HZ = (500.0, 10_000.0)
 #: Where in the recording the three detailed windows sit (early, middle, late).
 WINDOW_FRACTIONS = (0.1, 0.5, 0.9)
@@ -198,14 +198,12 @@ def pipeline_windows(shank, *, n_channels: int, fs: float, width: int,
     rather than stretched to fit when the file does not describe the same
     channels, rate and window length as the rest of the figure.
     """
-    path = shank.directory / PIPELINE_FILE
-    if not path.exists():
+    kept = load_destriped_windows(shank.directory)
+    if kept is None:
         return None, None, "not kept for this sort (re-run its quality metrics)"
-    with np.load(path) as kept:
-        traces = kept["traces"]
-        scale = float(kept["uv_per_count"]) if "uv_per_count" in kept.files else 1.0
-        starts = [int(x) for x in kept["starts"]]
-        kept_margin, kept_fs = int(kept["margin"]), float(kept["fs"])
+    traces, scale = kept.traces, kept.uv_per_count
+    starts = [int(x) for x in kept.starts]
+    kept_margin, kept_fs = kept.margin, kept.fs
     if abs(kept_fs - fs) > 1e-6 * fs:
         return None, None, f"kept at {kept_fs:g} Hz, recording is {fs:g} Hz"
     if traces.shape[2] != n_channels:
