@@ -310,8 +310,13 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
             close()
 
     return {
-        "label": shank.label, "short": f"imec{shank.probe} sh{shank.shank}",
-        "probe": shank.probe, "shank": shank.shank, "fs": fs,
+        # "probe" selects the row in the per-shank grids. It is the probe
+        # number in a session with one run. Each run numbers its probes from 0.
+        # So with several runs each (run, probe) pair gets its own row. See
+        # session.find_session_shanks.
+        "label": shank.label,
+        "short": f"{getattr(shank, 'probe_name', f'imec{shank.probe}')} sh{shank.shank}",
+        "probe": getattr(shank, "color_probe", shank.probe), "shank": shank.shank, "fs": fs,
         "depth_um": positions[:, 1].astype(float),
         "freq_centers": centers, "freqs": freqs[freqs >= FREQ_MIN_HZ],
         "pooled_db": pooled, "median_psd_db": median_psd, "rms_uv": rms,
@@ -564,7 +569,7 @@ def rms_summary(measured: list[dict], *, title="", subtitle=""):
         ax.plot([i, i], [low, high], color="#444444", lw=1.5)
         ax.plot(i, np.median(values), "o", color=STAGE_COLORS[-1], ms=5)
     ax.set_xticks(range(len(measured)))
-    ax.set_xticklabels([m["short"] for m in measured], rotation=60, fontsize=7,
+    ax.set_xticklabels([m["short"] for m in measured], rotation=60, fontsize=8,
                        ha="right")
     ax.set_xlabel("Shank")
     ax.set_ylabel("Median RMS after demux CAR (µV)")

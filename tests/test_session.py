@@ -28,14 +28,26 @@ N_SAMPLES = 60_000
 def write_shank(session_dir, probe: int, shank: int, *, n_units: int = 6,
                 gain: float = 3.0, provenance: bool = True,
                 sorter_output: bool = True, verdicts: bool = True,
-                passing: int = 2) -> None:
-    """One shank's sort output, shaped the way SortingManager leaves it."""
-    directory = session_dir / "sorting" / f"imec{probe}_shank{shank}"
+                passing: int = 2, run: str | None = None,
+                source_run: str | None = None, trigger: str = "t0") -> None:
+    """Writes one shank's sort output in SortingManager's layout.
+
+    ``run`` such as ``p1_g0`` names the folder as SortingManager has since
+    2026-10-28. Without it the folder has the older name. ``source_run`` is
+    the run that ``provenance.json`` records. Every sort records one.
+    ``trigger`` is the trigger file of the recorded source.
+    """
+    name = f"{run}_imec{probe}_shank{shank}" if run else f"imec{probe}_shank{shank}"
+    directory = session_dir / "sorting" / name
     directory.mkdir(parents=True, exist_ok=True)
     if provenance:
+        recording = {"sample_rate": FS}
+        if source_run or run:
+            recording["source"] = (f"D:\\scratch\\{source_run or run}_{trigger}."
+                                   f"imec{probe}.sh{shank}.ap.bin")
         (directory / "provenance.json").write_text(json.dumps({
             "gain_to_uv": gain, "duration_s": N_SAMPLES / FS,
-            "recording": {"sample_rate": FS},
+            "recording": recording,
         }), encoding="utf-8")
     if verdicts:
         (directory / "quality_metrics.json").write_text(json.dumps({
@@ -183,7 +195,8 @@ def test_the_label_floor_is_computed_from_the_label_height(session):
 
     assert floor == S.min_block_rows(1400, label_pt=S.SHANK_LABEL_PT)
     assert S.min_block_rows(1400, label_pt=15.0) > floor, "bigger type, more room"
-    assert S.min_block_rows(2800) == 2 * floor, "more rows, proportionally more"
+    # Within one row: min_block_rows rounds up.
+    assert abs(S.min_block_rows(2800) - 2 * floor) <= 1, "more rows, proportionally more"
 
 
 def test_binning_puts_every_spike_in_a_bin(session):
@@ -296,3 +309,269 @@ def test_a_layout_the_palette_does_not_name_still_gets_a_color():
     """Grey on purpose: a wrong hue would read as a probe identity that does
     not exist."""
     assert S.color_for(9, 9) == S.UNKNOWN_COLOR
+
+
+# --------------------------------------------------------------------------
+# Two runs in one session: two computers each number their probes from 0
+# --------------------------------------------------------------------------
+@pytest.fixture
+def two_runs(tmp_path):
+    """XL_009 on 2026-10-28. Run p1 was sorted before folder names included
+    the run. Run p0 was sorted after. Both have an imec0."""
+    session_dir = tmp_path / "XL_009" / "2026-10-28" / "1"
+    for shank in (0, 1):
+        write_shank(session_dir, 0, shank, source_run="p1_g0")
+        write_shank(session_dir, 0, shank, run="p0_g0")
+    return session_dir
+
+
+def test_two_runs_imec0_are_two_probes(two_runs):
+    found = S.find_session_shanks(two_runs)
+
+    assert {(s.run, s.probe, s.shank) for s in found.shanks} == {
+        ("p0_g0", 0, 0), ("p0_g0", 0, 1), ("p1_g0", 0, 0), ("p1_g0", 0, 1)}
+    assert len(found.probes) == 2
+    assert len({s.color for s in found.shanks}) == 4
+    assert sorted(s.short_label for s in found.shanks) == [
+        "p0:0.0", "p0:0.1", "p1:0.0", "p1:0.1"]
+    assert {s.label for s in found.shanks} == {
+        "imec0_shank0", "imec0_shank1", "p0_g0_imec0_shank0", "p0_g0_imec0_shank1"}
+
+
+def test_one_run_named_either_way_reads_as_before(tmp_path):
+    for run in (None, "p1_g0"):
+        session_dir = tmp_path / str(run) / "1"
+        write_shank(session_dir, 0, 0, run=run, source_run="p1_g0")
+        write_shank(session_dir, 1, 0, run=run, source_run="p1_g0")
+
+        found = S.find_session_shanks(session_dir)
+
+        assert [s.short_label for s in found.shanks] == ["0.0", "1.0"]
+        assert [s.color for s in found.shanks] == [S.color_for(0, 0), S.color_for(1, 0)]
+
+
+def test_a_shanks_raw_file_is_its_own_runs(two_runs):
+    for run in ("p0_g0", "p1_g0"):
+        folder = two_runs / "raw_ephys_data" / f"{run}_imec0"
+        folder.mkdir(parents=True)
+        (folder / f"{run}_t0.imec0.sh0.ap.cbin").write_bytes(b"")
+    found = S.find_session_shanks(two_runs)
+
+    for shank in (s for s in found.shanks if s.shank == 0):
+        cbin, _ch = S._ap_paths(shank)
+        assert cbin.name.startswith(shank.run)
+
+
+def test_find_band_takes_a_run_and_refuses_to_guess_between_two(two_runs):
+    from qualitymetrics.raw import RawError, find_band
+
+    for run in ("p0_g0", "p1_g0"):
+        folder = two_runs / "raw_ephys_data" / f"{run}_imec0"
+        folder.mkdir(parents=True)
+        (folder / f"{run}_t0.imec0.sh0.ap.cbin").write_bytes(b"")
+    assert find_band(two_runs, "imec0", 0, run="p1_g0").name.startswith("p1_g0")
+    assert find_band(two_runs, "imec0", 0, run="p0_g0").name.startswith("p0_g0")
+    with pytest.raises(RawError, match="Pass the run"):
+        find_band(two_runs, "imec0", 0)
+
+
+def test_find_band_without_a_run_finds_a_single_runs_file(tmp_path):
+    from qualitymetrics.raw import find_band
+
+    folder = tmp_path / "raw_ephys_data" / "p1_g0_imec2"
+    folder.mkdir(parents=True)
+    (folder / "p1_g0_t0.imec2.sh3.ap.cbin").write_bytes(b"")
+    assert find_band(tmp_path, "imec2", 3).name == "p1_g0_t0.imec2.sh3.ap.cbin"
+
+
+def test_a_sort_naming_no_run_beside_named_ones_is_the_same_run(tmp_path):
+    session_dir = tmp_path / "1"
+    write_shank(session_dir, 0, 0)                 # Older sort: no source.
+    write_shank(session_dir, 0, 1, source_run="p1_g0")
+    found = S.find_session_shanks(session_dir)
+    assert {s.run for s in found.shanks} == {"p1_g0"}
+    assert len(found.probes) == 1
+    assert [s.short_label for s in found.shanks] == ["0.0", "0.1"]
+
+
+def test_find_recording_reads_both_names_and_stays_in_its_session(tmp_path):
+    from qualitymetrics.report import find_recording
+
+    session_dir = tmp_path / "XL_009" / "2026-10-28" / "1"
+    write_shank(session_dir, 1, 3, run="p1_g0")
+    write_shank(session_dir, 0, 0, source_run="p1_g0")
+    for probe, shank in ((1, 3), (0, 0)):
+        folder = session_dir / "raw_ephys_data" / f"p1_g0_imec{probe}"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"p1_g0_t0.imec{probe}.sh{shank}.lf.cbin").write_bytes(b"")
+    found = find_recording(session_dir / "sorting" / "p1_g0_imec1_shank3", "lf")
+    assert found.name == "p1_g0_t0.imec1.sh3.lf.cbin"
+    found = find_recording(session_dir / "sorting" / "imec0_shank0", "lf")
+    assert found.name == "p1_g0_t0.imec0.sh0.lf.cbin"
+    # Another session of the subject has the band that this session lacks.
+    # find_recording must not return it.
+    other = tmp_path / "XL_009" / "2026-10-27" / "1" / "raw_ephys_data" / "p1_g0_imec1"
+    other.mkdir(parents=True)
+    (other / "p1_g0_t0.imec1.sh3.ap.cbin").write_bytes(b"")
+    assert find_recording(session_dir / "sorting" / "p1_g0_imec1_shank3", "ap") is None
+
+
+def test_a_second_trigger_files_folder_finds_its_files(tmp_path):
+    from qualitymetrics.raw import find_band
+
+    session_dir = tmp_path / "1"
+    write_shank(session_dir, 0, 0, run="p4_t1_g0", source_run="p4_g0", trigger="t1")
+    folder = session_dir / "raw_ephys_data" / "p4_t1_g0_imec0"
+    folder.mkdir(parents=True)
+    (folder / "p4_g0_t1.imec0.sh0.ap.cbin").write_bytes(b"")
+    [shank] = S.find_session_shanks(session_dir).shanks
+    assert shank.run == "p4_g0"
+    assert S._ap_paths(shank)[0].name == "p4_g0_t1.imec0.sh0.ap.cbin"
+    odd = session_dir / "raw_ephys_data" / "a[1]_g0_imec0"
+    odd.mkdir()
+    (odd / "a[1]_g0_t0.imec0.sh2.ap.cbin").write_bytes(b"")
+    assert find_band(session_dir, "imec0", 2, run="a[1]_g0").name.startswith("a[1]")
+
+
+def test_a_run_named_like_a_trigger_file_finds_its_own_files(tmp_path):
+    from qualitymetrics.report import find_recording
+
+    session_dir = tmp_path / "1"
+    write_shank(session_dir, 0, 0, run="sess_t3_g0")
+    folder = session_dir / "raw_ephys_data" / "sess_t3_g0_imec0"
+    folder.mkdir(parents=True)
+    for band in ("ap", "lf"):
+        (folder / f"sess_t3_g0_t0.imec0.sh0.{band}.cbin").write_bytes(b"")
+    [shank] = S.find_session_shanks(session_dir).shanks
+    assert shank.run == "sess_t3_g0"
+    assert S._ap_paths(shank)[0].name == "sess_t3_g0_t0.imec0.sh0.ap.cbin"
+    found = find_recording(session_dir / "sorting" / "sess_t3_g0_imec0_shank0", "lf")
+    assert found.name == "sess_t3_g0_t0.imec0.sh0.lf.cbin"
+
+
+def test_eight_probes_get_eight_hues():
+    """Two computers can record eight probes in one session."""
+    colors = {S.color_for(probe, shank) for probe in range(8) for shank in range(4)}
+    assert len(colors) == 32
+    assert S.UNKNOWN_COLOR not in colors
+
+
+def test_a_missing_shank_leaves_its_violin_slot_empty():
+    """The shanks are not labeled, so a violin's place says which shank it is."""
+    rng = np.random.default_rng(0)
+    measurements = [{
+        "probe": probe, "probe_name": f"imec{probe}", "slot": probe, "shank": shank,
+        "per_channel": {"unreferenced_uv": rng.normal(12, 1, 20),
+                        "residual_uv": rng.normal(7, 1, 20)},
+    } for probe, shank in ((0, 0), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2), (1, 3))]
+
+    figure = S.rms_across_shanks(measurements)
+
+    from matplotlib.collections import PolyCollection
+
+    bodies = [c for c in figure.axes[0].collections if isinstance(c, PolyCollection)]
+    centers = [round(float(np.mean(c.get_paths()[0].vertices[:, 0])), 1) for c in bodies]
+    stride = 4 + 0.7
+    assert centers == [0.0, 2.0, 3.0, stride, stride + 1, stride + 2, stride + 3]
+
+
+def test_find_band_does_not_take_another_probes_file(tmp_path):
+    from qualitymetrics.raw import RawError, find_band
+
+    folder = tmp_path / "raw_ephys_data" / "p1_g0_imec1"
+    folder.mkdir(parents=True)
+    (folder / "p1_g0_t0.imec1.sh0.ap.cbin").write_bytes(b"")
+    with pytest.raises(RawError, match="no ap recording"):
+        find_band(tmp_path, "imec0", 0, run="p1_g0")
+
+
+def test_runs_with_a_shared_prefix_get_different_labels(tmp_path):
+    session_dir = tmp_path / "1"
+    write_shank(session_dir, 0, 0, run="m_grating_g0")
+    write_shank(session_dir, 0, 0, run="m_gfp_g0")
+    names = {s.name for s in S.find_session_shanks(session_dir).shanks}
+    assert names == {"m_grating imec0 sh0", "m_gfp imec0 sh0"}
+
+
+def test_violins_of_identical_values_still_draw():
+    measurements = [{"probe": 0, "shank": shank, "per_channel": {
+        "unreferenced_uv": np.full(20, 10.0), "residual_uv": np.full(20, 10.0)}}
+        for shank in range(4)]
+    import warnings
+
+    with warnings.catch_warnings():
+        # Matplotlib only warns about an axis of zero height.
+        warnings.simplefilter("error")
+        bottom, top = S.rms_across_shanks(measurements).axes[0].get_ylim()
+    assert top > bottom
+
+
+def test_each_run_is_named_once_over_its_probes():
+    rng = np.random.default_rng(0)
+    measurements = [{
+        "probe": probe, "probe_name": f"{run} imec{probe}", "run": run,
+        "slot": slot, "shank": shank,
+        "per_channel": {"unreferenced_uv": rng.normal(12, 1, 20),
+                        "residual_uv": rng.normal(7, 1, 20)},
+    } for slot, (run, probe) in enumerate((("JRS_0053_rec", 0), ("JRS_0053_rec", 1),
+                                           ("p1", 0)))
+        for shank in range(4)]
+
+    # The names sit under the lower panel.
+    texts = [t.get_text() for t in S.rms_across_shanks(measurements).axes[-1].texts]
+
+    assert texts.count("JRS_0053_rec") == 1
+    assert texts.count("p1") == 1
+    assert texts.count("imec0") == 2
+
+
+def test_sites_above_the_cut_are_counted_over_their_violin():
+    rng = np.random.default_rng(0)
+    measurements = [{"probe": 0, "shank": shank, "per_channel": {
+        "unreferenced_uv": np.r_[rng.normal(12, 1, 2000), [400.0] * (shank == 2) * 3],
+        "residual_uv": rng.normal(7, 1, 2000)}} for shank in range(4)]
+
+    texts = [t.get_text() for t in S.rms_across_shanks(measurements).axes[0].texts]
+
+    assert r"$\uparrow$3 sites" in texts
+
+
+def test_a_sorts_raw_file_is_its_own_trigger_files(tmp_path):
+    from qualitymetrics.report import find_recording
+
+    session_dir = tmp_path / "1"
+    write_shank(session_dir, 0, 0, run="p4_t1_g0", source_run="p4_g0", trigger="t1")
+    shank_dir = session_dir / "sorting" / "p4_t1_g0_imec0_shank0"
+    for folder, trigger in (("p4_g0_imec0", "t0"), ("p4_t1_g0_imec0", "t1")):
+        raw = session_dir / "raw_ephys_data" / folder
+        raw.mkdir(parents=True)
+        for band in ("ap", "lf"):
+            (raw / f"p4_g0_{trigger}.imec0.sh0.{band}.cbin").write_bytes(b"")
+
+    [shank] = S.find_session_shanks(session_dir).shanks
+
+    assert S._ap_paths(shank)[0].name == "p4_g0_t1.imec0.sh0.ap.cbin"
+    assert find_recording(shank_dir, "lf").name == "p4_g0_t1.imec0.sh0.lf.cbin"
+
+
+def test_find_band_sees_two_runs_stored_in_different_formats(two_runs):
+    from qualitymetrics.raw import RawError, find_band
+
+    for run, suffix in (("p0_g0", "cbin"), ("p1_g0", "bin")):
+        folder = two_runs / "raw_ephys_data" / f"{run}_imec0"
+        folder.mkdir(parents=True)
+        (folder / f"{run}_t0.imec0.sh0.ap.{suffix}").write_bytes(b"")
+    with pytest.raises(RawError, match="Pass the run"):
+        find_band(two_runs, "imec0", 0)
+    assert find_band(two_runs, "imec0", 0, run="p1_g0").suffix == ".bin"
+
+
+def test_two_trigger_files_of_one_run_are_labeled_apart(tmp_path):
+    session_dir = tmp_path / "1"
+    write_shank(session_dir, 0, 0, run="p4_g0")
+    write_shank(session_dir, 0, 0, run="p4_t1_g0", source_run="p4_g0", trigger="t1")
+
+    shanks = S.find_session_shanks(session_dir).shanks
+
+    assert {s.name for s in shanks} == {"p4 imec0 sh0", "p4 t1 imec0 sh0"}
+    assert len({s.color for s in shanks}) == 2

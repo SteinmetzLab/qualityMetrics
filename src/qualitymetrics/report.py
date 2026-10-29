@@ -7,6 +7,7 @@ not, so a missing figure is visible rather than silently absent.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -70,18 +71,48 @@ def find_recording(sorting_dir: str | Path, band: str = "ap") -> Path | None:
     when the raw file is on another machine.
     """
     sorting_dir = Path(sorting_dir).resolve()
-    name = sorting_dir.name                          # e.g. imec0_shank0
-    probe, _, shank_part = name.partition("_")
-    try:
-        shank = int("".join(c for c in shank_part if c.isdigit()))
-    except ValueError:
+    run, trigger, probe, shank = _shank_dir_key(sorting_dir)
+    if probe is None:
         return None
     for parent in list(sorting_dir.parents)[:4]:
+        session_root = (parent / "raw_ephys_data").is_dir()
         try:
-            return find_band(parent, probe, shank, band)
+            return find_band(parent, probe, shank, band, run=run, trigger=trigger)
         except RawError:
-            continue
+            pass
+        if session_root:
+            # The session's own raw_ephys_data has no match. Folders higher
+            # up hold other sessions of the subject. Another session's file
+            # for this probe and shank would be wrong.
+            return None
     return None
+
+
+def _shank_dir_key(sorting_dir: Path) -> tuple[str | None, str | None,
+                                               str | None, int]:
+    """Returns ``(run, trigger, "imec<P>", shank)`` for a shank directory.
+
+    The name is ``p1_g0_imec0_shank2``. Sorts made before SortingManager
+    added the run are named ``imec0_shank2``. The run is read from
+    ``provenance.json`` if it names a source. For details, see
+    ``plots.session.sort_run``. Returns ``(None, None, None, 0)`` for any
+    other name.
+    """
+    from .plots.session import SHANK_DIR_RE, sort_run, sort_trigger
+
+    match = SHANK_DIR_RE.match(sorting_dir.name)
+    if match is None:
+        return None, None, None, 0
+    try:
+        recording = json.loads((sorting_dir / "provenance.json").read_text(
+            encoding="utf-8")).get("recording", {})
+        if not isinstance(recording, dict):
+            recording = {}
+    except (OSError, ValueError, AttributeError):
+        recording = {}
+    run = sort_run(match.group("run"), recording)
+    trigger = sort_trigger(match.group("run"), recording)
+    return run, trigger, f"imec{match.group('probe')}", int(match.group("shank"))
 
 
 def build_report(sorting_dir: str | Path, out_dir: str | Path,
