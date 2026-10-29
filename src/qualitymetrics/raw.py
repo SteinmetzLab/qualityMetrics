@@ -14,6 +14,7 @@ thousands where the real values were tens.
 """
 from __future__ import annotations
 
+import glob
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -275,24 +276,52 @@ class RawRecording:
         self.close()
 
 
+def _names_probe(name: str, probe: str) -> bool:
+    """True if a file name names this probe or names no probe."""
+    named = re.search(r"imec\d+", name)
+    return named is None or named.group(0) == probe
+
+
 def find_band(session_dir: str | Path, probe: str, shank: int,
-              band: str = "ap") -> Path:
+              band: str = "ap", run: str | None = None,
+              trigger: str | None = None) -> Path:
     """Locate the archived recording for one shank of one probe.
 
     Written against the SortingManager archive layout, but falls back to a glob
     so a differently named archive still resolves.
+
+    ``run`` such as ``p1_g0`` selects one of the session's runs. Two computers
+    that record one session each number their probes from imec0. Without a run
+    one probe number can match a recording in each run. This function then
+    raises ``RawError``. It does not return the first match. ``trigger`` such
+    as ``t1`` selects one trigger file of the run.
     """
     session_dir = Path(session_dir)
     roots = [session_dir / "raw_ephys_data", session_dir]
-    patterns = [f"*{probe}*sh{shank}.{band}.cbin",
-                f"*{probe}*sh{shank}.{band}.bin",
-                f"*sh{shank}.{band}.cbin", f"*sh{shank}.{band}.bin"]
+    if run and trigger:
+        prefix = f"{glob.escape(run)}_{glob.escape(trigger)}."
+    else:
+        prefix = f"{glob.escape(run)}_" if run else ""
+    # The second pattern ignores the probe. _names_probe then drops files
+    # named for another probe. Their data would be another probe's.
+    patterns = [f"{prefix}*{probe}*sh{shank}.{band}", f"{prefix}*sh{shank}.{band}"]
     for root in roots:
         if not root.exists():
             continue
         for pattern in patterns:
-            hits = sorted(root.glob(f"**/{pattern}"))
+            # Both formats at once: a run stored as .cbin must not hide
+            # another run stored as .bin.
+            hits = [hit for suffix in (".cbin", ".bin")
+                    for hit in sorted(root.glob(f"**/{pattern}{suffix}"))
+                    if _names_probe(hit.name, probe)]
+            folders = {hit.parent for hit in hits}
+            if len(folders) > 1:
+                raise RawError(
+                    f"Found {band} recordings of {probe} shank {shank} in "
+                    f"{len(folders)} folders under {session_dir}. "
+                    f"Pass the {'trigger' if run else 'run'}.")
             if hits:
+                # A .cbin before a .bin of the same recording.
                 return hits[0]
     raise RawError(
         f"no {band} recording for {probe} shank {shank} under {session_dir}")

@@ -19,7 +19,9 @@ numbers would be worse than no figure.
 """
 from __future__ import annotations
 
+import glob
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,8 +31,58 @@ import numpy as np
 from ..ksdata import KilosortResults
 from ..style import despine, save, use_lab_style
 
-#: ``imec<P>_shank<S>``, the directory one sort writes.
-SHANK_DIR_RE = re.compile(r"^imec(?P<probe>\d+)_shank(?P<shank>\d+)$")
+#: The directory that one sort writes. Its name is ``<run>_imec<P>_shank<S>``
+#: with a run such as ``p1_g0``. Sorts made before 2026-10-28 are named
+#: ``imec<P>_shank<S>``. Two computers that record one session each number
+#: their probes from imec0. The run tells their sorts apart.
+SHANK_DIR_RE = re.compile(
+    r"^(?:(?P<run>.+_g\d+)_)?imec(?P<probe>\d+)_shank(?P<shank>\d+)$")
+#: Matches the run and trigger in a sort's source file name such as
+#: ``p1_g0_t0.imec0.sh2.ap.bin``.
+_SOURCE_RUN_RE = re.compile(r"^(?P<run>.+_g\d+)_(?P<trigger>t(?:\d+|cat))\.imec\d+")
+
+
+def file_run(run: str | None) -> str | None:
+    """Returns the run as its file names spell it.
+
+    SortingManager's queue names the run of a second trigger file ``p4_t1_g0``.
+    Its file names spell the run ``p4_g0``. This function returns ``p4_g0``
+    for that run.
+    """
+    return re.sub(r"_t\d+(?=_g\d+$)", "", run) if run else run
+
+
+def sort_run(folder_run: str | None, recording: dict) -> str | None:
+    """Returns the run of one sort.
+
+    The source file name in ``provenance.json`` names the run without doubt.
+    A folder name can be read two ways. ``sess_t3_g0`` is either a run named
+    ``sess_t3`` or the third trigger file of run ``sess``. The folder name is
+    used only if the provenance names no source.
+    """
+    named = _SOURCE_RUN_RE.match(_source_name(recording))
+    return named.group("run") if named else file_run(folder_run)
+
+
+def sort_trigger(folder_run: str | None, recording: dict) -> str | None:
+    """Returns the trigger file of one sort, such as ``t1``, or None.
+
+    One run can hold several trigger files. Each has its own raw files. The
+    source file name in ``provenance.json`` names the trigger. A folder such
+    as ``p4_t1_g0`` names it too. A folder such as ``p4_g0`` does not: its
+    trigger may be ``t0`` or ``tcat``. Without a source, a folder such as
+    ``sess_t3_g0`` reads as trigger ``t3`` of run ``sess``, as in
+    ``sort_run``.
+    """
+    named = _SOURCE_RUN_RE.match(_source_name(recording))
+    if named:
+        return named.group("trigger")
+    in_folder = re.search(r"_(t\d+)_g\d+$", folder_run or "")
+    return in_folder.group(1) if in_folder else None
+
+
+def _source_name(recording: dict) -> str:
+    return Path(str(recording.get("source") or "").replace("\\", "/")).name
 
 #: Hue identifies the probe, lightness identifies the shank.
 #:
@@ -38,14 +90,24 @@ SHANK_DIR_RE = re.compile(r"^imec(?P<probe>\d+)_shank(?P<shank>\d+)$")
 #: deuteranopia (Machado, Oliveira and Fernandes 2009, severity 1.0), and within
 #: each hue for monotone lightness so shank order is visible in the color.
 #: Sixteen colors can never be pairwise distinct, so color is never the only
-#: cue here: every figure also labels the probe and shank on an axis.
+#: cue here: every figure also labels each probe.
+#:
+#: Probes 4 to 7 use four more hues on the same lightness ramp. The hues are
+#: 110, 200, 290 and 15 degrees. A session on two computers can hold eight
+#: probes. No set of four more hues keeps all 32 colors apart under
+#: protanopia and deuteranopia. So these four hues are not checked. The labels
+#: carry the probe identity. They are drawn in ink at a readable size.
 PALETTE: dict[tuple[int, int], str] = {
     (0, 0): "#006eae", (0, 1): "#0090e2", (0, 2): "#50b3ff", (0, 3): "#a2d4ff",
     (1, 0): "#9f5000", (1, 1): "#ce6a00", (1, 2): "#f28e42", (1, 3): "#ffbe91",
     (2, 0): "#007d51", (2, 1): "#00a36a", (2, 2): "#38c789", (2, 3): "#8ae4b5",
     (3, 0): "#9b418b", (3, 1): "#c25faf", (3, 2): "#e484d0", (3, 3): "#fbb2ea",
+    (4, 0): "#6d6e01", (4, 1): "#8f9001", (4, 2): "#b1b22b", (4, 3): "#d1d487",
+    (5, 0): "#01787d", (5, 1): "#059ca3", (5, 2): "#0ac2ca", (5, 3): "#77e1e7",
+    (6, 0): "#6959ae", (6, 1): "#8a76df", (6, 2): "#aa9aff", (6, 3): "#ccc6ff",
+    (7, 0): "#a74350", (7, 1): "#d65b6b", (7, 2): "#fa808c", (7, 3): "#ffb8bc",
 }
-#: Grey, for a layout beyond the sixteen the palette names. A wrong hue would
+#: Grey, for a layout beyond the 32 colors the palette names. A wrong hue would
 #: read as a probe identity that does not exist.
 UNKNOWN_COLOR = "#8a8a8a"
 INK = "#222222"
@@ -61,11 +123,18 @@ NOISE_WINDOW_S = 1.0
 #: Skipped at each end: the first moments of a recording carry settling
 #: transients that are not the noise floor.
 NOISE_EDGE_SKIP_S = 20.0
-#: Point size of the per-shank labels down the left of the raster.
-SHANK_LABEL_PT = 7.5
+#: Point size of the label on each shank's block in the raster. It is large
+#: enough to read without color cues. A color-blind reader may not tell
+#: probes 4 to 7 from probes 0 to 3 by color.
+SHANK_LABEL_PT = 10.0
 #: Height of the raster axes in inches, near enough, after tight_layout on the
 #: 8 inch figure below. Only used to convert a label height into rows.
 RASTER_AXES_IN = 6.2
+#: Width of both session figures: 18 cm, a standard page figure width.
+FIGURE_WIDTH_IN = 18 / 2.54
+#: Raster height in inches for a session of more than 16 shanks. Each block
+#: holds a label. 32 blocks do not fit in 8 inches at SHANK_LABEL_PT.
+TALL_RASTER_IN = 10.5
 
 
 def min_block_rows(max_rows: int, *, label_pt: float = SHANK_LABEL_PT,
@@ -102,19 +171,63 @@ class SessionShank:
     directory: Path
     ks: KilosortResults
     duration_s: float
+    #: The run such as ``p1_g0``. It comes from the folder name or from
+    #: ``provenance.json``. None if neither names it.
+    run: str | None = None
+    #: The trigger file such as ``t1``. None if neither names it.
+    trigger: str | None = None
+    #: The probe's position in the session for color and order. It is the
+    #: probe number in a session with one run. Each run numbers its probes
+    #: from 0. So with several runs it is the index of the (run, probe) pair.
+    #: See find_session_shanks.
+    slot: int | None = None
+    #: True if the session has several runs. Labels then include the run.
+    several_runs: bool = False
 
     @property
     def label(self) -> str:
-        return f"imec{self.probe}_shank{self.shank}"
+        return self.directory.name
+
+    @property
+    def recording(self) -> str | None:
+        """The run, with the trigger file if it is a later one: ``p4_g0``, or
+        ``p4_g0 t1``. Each trigger file is its own recording."""
+        if self.run and self.trigger not in (None, "t0", "tcat"):
+            return f"{self.run} {self.trigger}"
+        return self.run
+
+    @property
+    def run_token(self) -> str:
+        """The recording without its gate: ``p1`` for ``p1_g0``, ``p4 t1``
+        for trigger ``t1`` of ``p4_g0``. ``?`` if the run is not known."""
+        return re.sub(r"_g\d+(?= |$)", "", self.recording or "") or "?"
+
+    @property
+    def probe_name(self) -> str:
+        """The probe name such as ``imec0``. It is ``p1 imec0`` if the
+        session has several runs."""
+        return (f"{self.run_token} imec{self.probe}" if self.several_runs
+                else f"imec{self.probe}")
+
+    @property
+    def name(self) -> str:
+        """The probe and shank such as ``imec0 sh2`` or ``p1 imec0 sh2``."""
+        return f"{self.probe_name} sh{self.shank}"
 
     @property
     def short_label(self) -> str:
-        """``0.2`` for imec0 shank 2, which is what fits on a crowded axis."""
-        return f"{self.probe}.{self.shank}"
+        """A label that fits on a crowded axis: ``0.2`` for imec0 shank 2. It
+        is ``p1:0.2`` if the session has several runs."""
+        prefix = f"{self.run_token}:" if self.several_runs else ""
+        return f"{prefix}{self.probe}.{self.shank}"
 
     @property
     def color(self) -> str:
-        return color_for(self.probe, self.shank)
+        return color_for(self.color_probe, self.shank)
+
+    @property
+    def color_probe(self) -> int:
+        return self.probe if self.slot is None else self.slot
 
     def quality_metrics(self) -> dict:
         """The per-unit verdicts the pipeline recorded, or ``{}`` if absent.
@@ -159,7 +272,9 @@ class SessionSorts:
 
     @property
     def probes(self) -> list[int]:
-        return sorted({s.probe for s in self.shanks})
+        """The color slot of each probe in the session. Two runs' imec0 count
+        as two probes."""
+        return sorted({s.color_probe for s in self.shanks})
 
     @property
     def describe(self) -> str:
@@ -206,7 +321,9 @@ def find_session_shanks(session_dir: str | Path) -> SessionSorts:
             # wearing a microvolt label.
             found.incomplete.append(f"{entry.name} (no gain_to_uv or uv_per_bit)")
             continue
-        label = f"imec{match.group('probe')}_shank{match.group('shank')}"
+        label = entry.name
+        run = sort_run(match.group("run"), recording)
+        trigger = sort_trigger(match.group("run"), recording)
         try:
             # Imported here rather than at module scope: report.py imports the
             # plots package, so a top-level import would close a cycle.
@@ -225,8 +342,22 @@ def find_session_shanks(session_dir: str | Path) -> SessionSorts:
             directory=entry,
             ks=ks,
             duration_s=float(provenance.get("duration_s", 0.0)),
+            run=run,
+            trigger=trigger,
         ))
-    found.shanks.sort(key=lambda s: (s.probe, s.shank))
+    # A sort whose provenance names no run belongs to the session's only
+    # named run. The session has several runs only if two or more are named.
+    # Two trigger files of one run are two recordings, labeled apart.
+    runs = {s.recording for s in found.shanks if s.run is not None}
+    if len(runs) == 1:
+        for shank in found.shanks:
+            shank.run = shank.run or next(s.run for s in found.shanks if s.run)
+    elif len(runs) > 1:
+        pairs = sorted({(s.recording or "", s.probe) for s in found.shanks})
+        for shank in found.shanks:
+            shank.slot = pairs.index((shank.recording or "", shank.probe))
+            shank.several_runs = True
+    found.shanks.sort(key=lambda s: (s.color_probe, s.shank))
     return found
 
 
@@ -236,7 +367,15 @@ def find_session_shanks(session_dir: str | Path) -> SessionSorts:
 def _ap_paths(shank: SessionShank) -> tuple[Path, Path]:
     """The archived ``.cbin`` and ``.ch`` this shank was sorted from."""
     raw_root = shank.directory.parent.parent / "raw_ephys_data"
-    pattern = f"*imec{shank.probe}/*imec{shank.probe}.sh{shank.shank}.ap.cbin"
+    # Match on the run and trigger if they are known. Two runs of one session
+    # can each have an imec0, and one run can have several trigger files. The
+    # file names include both even if the folder name spells them
+    # differently. The folder p4_t1_g0_imec0 of a second trigger file holds
+    # p4_g0_t1 files.
+    files = (f"{glob.escape(shank.run)}_{glob.escape(shank.trigger)}."
+             if shank.run and shank.trigger
+             else f"{glob.escape(shank.run)}_*" if shank.run else "*")
+    pattern = f"*imec{shank.probe}/{files}imec{shank.probe}.sh{shank.shank}.ap.cbin"
     matches = sorted(raw_root.glob(pattern))
     if not matches:
         raise FileNotFoundError(f"no AP file matching {pattern} under {raw_root}")
@@ -302,6 +441,10 @@ def channel_rms(shank: SessionShank, *, n_windows: int = NOISE_WINDOWS,
     return {
         "label": shank.label,
         "probe": shank.probe,
+        "probe_name": shank.probe_name,
+        "run": shank.run_token if shank.several_runs else None,
+        "slot": shank.color_probe,
+        "short": shank.short_label,
         "shank": shank.shank,
         "n_sites": int(n_ap),
         "common_mode_uv": float(np.median(common_rms)),
@@ -327,45 +470,191 @@ def rms_across_shanks(measurements: list[dict], *, title: str = "",
 
     use_lab_style()
     rows = [
-        ("unreferenced_uv", "AP band RMS, unreferenced\n(the conventional number)"),
-        ("residual_uv", "AP band RMS, common-median referenced\n(the detection floor)"),
+        ("unreferenced_uv", "Unreferenced"),
+        ("residual_uv", "Common-median referenced"),
     ]
-    labels = [f"{m['probe']}.{m['shank']}" for m in measurements]
-    figure, axes = plt.subplots(
-        len(rows), 1, figsize=(max(7.0, 0.55 * len(labels) + 3.0), 8.0),
-        sharex=True, squeeze=False)
+    # Each probe has one slot per shank. A shank without a measurement leaves
+    # its slot empty. The shanks are not labeled, so a slot's place says which
+    # shank it is.
+    probes = _probe_groups(measurements)
+    per_probe = max(m["shank"] for m in measurements) + 1
+    # A gap between probes, in slots, keeps neighboring probe names apart.
+    stride = per_probe + 0.7
+    positions = np.zeros(len(measurements))
+    for place, (start, end, _name) in enumerate(probes):
+        for index in range(start, end):
+            positions[index] = place * stride + measurements[index]["shank"]
+    n_slots = len(probes) * stride - 0.7
+    # Only each probe is labeled, so 32 violins fit in the standard width.
+    figure, axes = plt.subplots(len(rows), 1, figsize=(FIGURE_WIDTH_IN, 5.5),
+                                sharex=True, sharey=True, squeeze=False)
+    # One y-scale for both panels, so the drop from referencing is the drop
+    # between them. The axis starts at 0, so the drop looks as large as it is.
+    # A few far-out sites would leave the panel mostly empty. So the axis ends
+    # at the tallest violin once each violin's own far-out sites are set
+    # aside. Sites above that are left out, and a count over their violin
+    # says how many. The headroom holds the counts.
+    panels = [[np.asarray(m["per_channel"][measure], dtype=float)
+               for m in measurements] for measure, _r in rows]
+    fenced = [_without_far_out(group) for groups in panels for group in groups]
+    # A value of 0 at every site would give an axis of zero height.
+    high = max(max((float(np.max(f)) for f in fenced if f.size), default=0.0), 1.0)
+    shown_panels = [[group[np.isfinite(group) & (group <= high)] for group in groups]
+                    for groups in panels]
+    hidden = [[int(np.sum(group > high)) for group in groups] for groups in panels]
+    lines = [_count_lines(positions, counts, n_slots) for counts in hidden]
+    n_lines = max((max(rows_, default=-1) + 1 for rows_ in lines), default=0)
+    several_runs = any(m.get("run") for m in measurements)
+    headroom = 0.05 + 0.08 * n_lines
+    bottom, top, step = _round_axis(0.0, high * (1 + headroom), max_intervals=5)
+    span = top - bottom
+    count_line = 0.065 * span
 
-    for row, (measure, ylabel) in enumerate(rows):
+    for row, (_measure, reference) in enumerate(rows):
         axis = axes[row][0]
-        groups = [np.asarray(m["per_channel"][measure], dtype=float)
-                  for m in measurements]
-        parts = axis.violinplot(groups, positions=np.arange(len(labels)),
+        groups = panels[row]
+        # Each shape is drawn from the sites it shows. Far-out sites in the
+        # density estimate would flatten the shape into a block.
+        shown = shown_panels[row]
+        drawn = [index for index, group in enumerate(shown) if group.size]
+        parts = axis.violinplot([shown[index] for index in drawn],
+                                positions=positions[drawn],
                                 widths=0.85, showextrema=False, showmedians=True)
-        for body, measurement in zip(parts["bodies"], measurements, strict=False):
-            body.set_facecolor(color_for(measurement["probe"], measurement["shank"]))
+        for body, index in zip(parts["bodies"], drawn, strict=True):
+            measurement = measurements[index]
+            body.set_facecolor(color_for(measurement.get("slot", measurement["probe"]),
+                                         measurement["shank"]))
             body.set_alpha(0.85)
             body.set_edgecolor("none")
         parts["cmedians"].set_color(INK)
         parts["cmedians"].set_linewidth(1.2)
+        for position, count, line in zip(positions, hidden[row], lines[row],
+                                         strict=True):
+            if count:
+                unit = "site" if count == 1 else "sites"
+                # The math-text arrow sits on the baseline with the digits.
+                # Arial's own arrow drops below it.
+                axis.text(position, high + 0.01 * span + line * count_line,
+                          rf"$\uparrow${count} {unit}", ha="center", va="bottom",
+                          fontsize=9, color=INK)
 
         overall = float(np.median(np.concatenate(groups)))
         axis.axhline(overall, color=INK, linewidth=0.9, linestyle="--", alpha=0.6)
-        axis.text(len(labels) - 0.4, overall, f" {overall:.1f}", va="center",
+        axis.text(n_slots - 0.4, overall, f" {overall:.1f}", va="center",
                   ha="left", fontsize=8, color=INK, clip_on=False)
-        axis.set_ylabel(f"{ylabel}\nRMS (µV)", fontsize=9)
+        axis.set_title(reference, fontsize=11)
+        axis.set_ylabel("AP band RMS (µV)", fontsize=11)
+        axis.tick_params(labelsize=10)
         axis.grid(axis="y", color=GRID, linewidth=0.6)
         axis.set_axisbelow(True)
-        # A violin tail is a kernel estimate and runs past the data, so an
-        # automatic limit leaves the panel mostly empty.
-        axis.set_ylim(0, float(np.percentile(np.concatenate(groups), 99.9)) * 1.12)
+        axis.set_yticks(np.arange(bottom, top + step / 2, step))
+        axis.set_ylim(bottom, top)
         despine(axis)
 
-    axes[-1][0].set_xticks(np.arange(len(labels)))
-    axes[-1][0].set_xticklabels(labels, fontsize=8)
-    axes[-1][0].set_xlabel("probe.shank", fontsize=9, color=MUTED)
+    # The probe names sit under the lower panel. Both panels share its slots.
+    # A bracket under each probe's slots carries its name. It runs from the
+    # center of the first shank's slot to the center of the last. With several
+    # runs, a second bracket under each run's probes carries the run name once.
+    # A long run name then never crowds a probe name.
+    lower = axes[-1][0]
+    lower.set_xticks([])
+    lower.set_xlim(-0.6, n_slots - 0.4)
+    for place, (start, _end, name) in enumerate(probes):
+        if several_runs:
+            name = f"imec{measurements[start]['probe']}"
+        _bracket(lower, place * stride, place * stride + per_probe - 1, -0.04, name)
+    if several_runs:
+        runs = [measurements[start].get("run") or "?" for start, _e, _n in probes]
+        first = 0
+        for last in range(1, len(runs) + 1):
+            if last < len(runs) and runs[last] == runs[first]:
+                continue
+            _bracket(lower, first * stride, (last - 1) * stride + per_probe - 1,
+                     -0.19, runs[first])
+            first = last
     _caption(figure, title, subtitle)
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
     return figure
+
+
+#: A site is far out above its shank's third quartile plus this many
+#: interquartile ranges: Tukey's far-out fence.
+FAR_OUT_IQR = 3.0
+
+
+def _without_far_out(group: np.ndarray) -> np.ndarray:
+    """Returns the finite values of ``group`` at or below its far-out fence."""
+    finite = group[np.isfinite(group)]
+    if not finite.size:
+        return finite
+    q1, q3 = np.percentile(finite, [25, 75])
+    return finite[finite <= q3 + FAR_OUT_IQR * (q3 - q1)]
+
+
+def _count_lines(positions: np.ndarray, counts: list[int],
+                 n_slots: float) -> list[int]:
+    """Returns the line each hidden-site count goes on. Counts that would
+    overlap go on separate lines.
+
+    A label's width is estimated from its length: a character of 9-point Arial
+    is about 5 points wide. The axes are about 85% of the figure width.
+    """
+    slot_pt = FIGURE_WIDTH_IN * 72 * 0.85 / (n_slots + 1)
+    lines, ends = [], []
+    for position, count in zip(positions, counts, strict=True):
+        if not count:
+            lines.append(-1)
+            continue
+        half = 5.0 * len(f"x{count} sites") / 2 / slot_pt
+        line = next((index for index, end in enumerate(ends)
+                     if end < position - half), len(ends))
+        if line == len(ends):
+            ends.append(0.0)
+        ends[line] = position + half
+        lines.append(line)
+    return lines
+
+
+def _bracket(axis, left: float, right: float, level: float, name: str) -> None:
+    """Draws a bracket under the axes from ``left`` to ``right``, with ``name``
+    under it. ``level`` is a fraction of the axes height, below 0."""
+    along = axis.get_xaxis_transform()
+    axis.plot([left, left, right, right],
+              [level + 0.03, level, level, level + 0.03],
+              transform=along, color=INK, linewidth=1.0, clip_on=False)
+    # 11 points: eight names fit across 18 cm without touching.
+    axis.text((left + right) / 2, level - 0.015, name, transform=along,
+              ha="center", va="top", fontsize=11, color=INK)
+
+
+def _round_axis(low: float, high: float, *,
+                max_intervals: int) -> tuple[float, float, float]:
+    """Returns ``(bottom, top, step)`` for an axis that covers ``low`` to
+    ``high``. The step is the smallest of 1, 2, 2.5 or 5 times a power of 10
+    that needs at most ``max_intervals`` intervals. Both ends fall on a tick.
+    """
+    scale = 10.0 ** math.floor(math.log10(max(high - low, 1e-9) / max_intervals))
+    for factor in (1, 2, 2.5, 5, 10, 20):
+        step = factor * scale
+        bottom = step * math.floor(low / step)
+        top = step * math.ceil(high / step)
+        if round((top - bottom) / step) <= max_intervals:
+            return bottom, top, step
+    return bottom, top, step
+
+
+def _probe_groups(measurements: list[dict]) -> list[tuple[int, int, str]]:
+    """Returns ``(start, end, probe name)`` for each run of one probe's
+    measurements. Measurements arrive grouped by probe."""
+    slots = [m.get("slot", m["probe"]) for m in measurements]
+    found, start = [], 0
+    for end in range(1, len(slots) + 1):
+        if end < len(slots) and slots[end] == slots[start]:
+            continue
+        first = measurements[start]
+        found.append((start, end, first.get("probe_name") or f"imec{first['probe']}"))
+        start = end
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -417,8 +706,8 @@ def _fit_rows(counts: np.ndarray, target: int) -> np.ndarray:
 
     Growing repeats rows, which is what gives a shank with one surviving unit
     enough height to carry its own label. A row is therefore not a unit in
-    either direction, which is why the axis says "units, by probe.shank then
-    depth" rather than labelling row counts.
+    either direction, which is why the axis says "units, by depth" rather
+    than labelling row counts.
     """
     n = counts.shape[0]
     if n == target or n == 0:
@@ -445,7 +734,6 @@ def session_raster(shanks: list[SessionShank], *, duration_s: float | None = Non
     """
     import matplotlib.pyplot as plt
     from matplotlib.colors import to_rgb
-    from matplotlib.lines import Line2D
 
     use_lab_style()
     duration_s = duration_s or max((s.duration_s for s in shanks), default=0.0)
@@ -468,7 +756,9 @@ def session_raster(shanks: list[SessionShank], *, duration_s: float | None = Non
         raise ValueError("no units to draw for this session")
 
     total_units = sum(counts.shape[0] for _, counts in blocks)
-    floor_rows = min_block_rows(max_rows)
+    height_in = 8.0 if len(blocks) <= 16 else TALL_RASTER_IN
+    floor_rows = min_block_rows(max_rows,
+                                axes_in=RASTER_AXES_IN + height_in - 8.0)
     image_rows, boundaries, row_colors = [], [], []
     for shank, counts in blocks:
         # Proportional to unit count, so a shank that produced few units looks
@@ -490,39 +780,34 @@ def session_raster(shanks: list[SessionShank], *, duration_s: float | None = Non
         # shank's color at full strength.
         rgb[row] = 1.0 - intensity[row][:, None] * (1.0 - color)[None, :]
 
-    figure, axis = plt.subplots(figsize=(13.0, 8.0))
+    figure, axis = plt.subplots(figsize=(FIGURE_WIDTH_IN, height_in))
     axis.imshow(rgb, aspect="auto", interpolation="nearest", origin="upper",
                 extent=(0.0, duration_s / 60.0, intensity.shape[0], 0))
 
     position = 0
     for index, (shank, height, _n) in enumerate(boundaries):
-        axis.text(-0.008, position + height / 2, shank.short_label,
-                  transform=axis.get_yaxis_transform(), ha="right",
-                  va="center", fontsize=SHANK_LABEL_PT, color=shank.color)
+        # On the block itself, so no reader has to match a color.
+        axis.text(0.004, position + height / 2, shank.name,
+                  transform=axis.get_yaxis_transform(), ha="left",
+                  va="center", fontsize=SHANK_LABEL_PT, color=INK,
+                  bbox={"boxstyle": "round,pad=0.15", "facecolor": "white",
+                        "edgecolor": "none", "alpha": 0.85})
         position += height
         if position < intensity.shape[0]:
             following = (boundaries[index + 1][0]
                          if index + 1 < len(boundaries) else None)
             # A heavier rule between probes, where the shade ramp restarts.
-            if following is not None and following.probe != shank.probe:
+            if following is not None and following.color_probe != shank.color_probe:
                 axis.axhline(position, color=INK, linewidth=1.0, alpha=0.5)
             else:
                 axis.axhline(position, color="white", linewidth=0.8)
 
-    axis.set_xlabel("Time in the recording (minutes)", fontsize=9)
-    # labelpad clears the per-shank labels, drawn in the same margin with the
-    # y-axis transform. Without it the two are painted over each other.
-    axis.set_ylabel(f"{total_units} units, by probe.shank then depth",
-                    fontsize=9, labelpad=26)
+    axis.tick_params(labelsize=10)
+    axis.set_xlabel("Time in the recording (minutes)", fontsize=11)
+    axis.set_ylabel(f"{total_units} units, by depth", fontsize=11)
     axis.set_yticks([])
     axis.spines["left"].set_visible(False)
     despine(axis)
-    axis.legend(handles=[
-        Line2D([0], [0], color=color_for(probe, 1), linewidth=6,
-               label=f"imec{probe}")
-        for probe in sorted({s.probe for s, _h, _n in boundaries})],
-        loc="upper right", frameon=False, fontsize=8, ncol=4,
-        bbox_to_anchor=(1.0, 1.06))
 
     if unverdicted:
         subtitle += (f"   No recorded verdicts, so left out: "
