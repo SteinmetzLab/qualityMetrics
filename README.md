@@ -87,7 +87,7 @@ Needing the archived recording:
 
 | Figure | Question |
 | --- | --- |
-| `wall_heatmap` | The whole shank for a few milliseconds: dead channels, artifacts |
+| `wall_heatmap` | The whole shank for a few milliseconds: dead channels, artifacts, and whether the sorted data still has them |
 | `raw_traces` | What does the signal actually look like? |
 | `raw_with_spikes` | Do the sorter's spikes land on real deflections? |
 | `sample_waveforms` | Individual snippets, not just the averaged template |
@@ -95,6 +95,16 @@ Needing the archived recording:
 | `filter_state` | Is this file wideband, or already high-passed? |
 | `band_rms` | Activity over time and depth |
 | `depth_power` | Laminar structure in the power spectrum |
+
+`wall_heatmap` draws a second row, "As sorted", when the sort folder holds
+SortingManager's `destriped_windows.npz`: the same samples as Kilosort received
+them (destriped, light artifacts removed where the sort did that, before motion
+correction), on the same depth axis and color scale as the raw row. Without it,
+the raw row could not tell a laser artifact the pipeline had removed from one it
+had left behind. Laser onsets and offsets are marked when `light_events.npz` is
+there too. `qm report` reads both files from the sort folder; from Python, pass
+`cleaned=load_destriped_windows(sort_dir)` and
+`light_events=load_light_events(sort_dir)` (both in `qualitymetrics.pipelinefiles`).
 
 ## Two things to know about the numbers
 
