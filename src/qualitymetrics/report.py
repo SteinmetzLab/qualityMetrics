@@ -20,7 +20,7 @@ from .pipelinefiles import (
     load_destriped_windows,
     load_light_events,
 )
-from .raw import RawError, RawRecording, find_band, parse_meta, uv_per_bit
+from .raw import RawError, RawRecording, find_band, parse_meta, resolve_uv_per_bit
 from .style import save
 
 
@@ -127,12 +127,27 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                  artifact_z_um: float | None = None,
                  t_start_s: float | None = None,
                  write_phy: bool = True,
-                 example_units: int = 12) -> ReportResult:
+                 example_units: int = 12,
+                 uv_per_bit: float | None = None) -> ReportResult:
     """Make every figure that this shank's available data supports.
 
     raw_path and lf_path are found automatically from the session layout when
     not given. Figures that need the raw file are skipped, with a reason, when
     it cannot be found.
+
+    ``uv_per_bit`` is the AP band's microvolts per bit, for a recording whose
+    meta states no gain (SpikeGLX 20201024 writes no ``imChan0apGain``), or
+    with no raw file at all. Where the meta states one, the two must agree
+    (``raw.resolve_uv_per_bit``); when they do not, every figure in
+    microvolts and every figure reading the raw file is skipped with the
+    reason, because one of the two numbers is wrong. It applies to the AP
+    file only: an LF file's gain can differ (Neuropixels 1.0), so its meta
+    must state its own.
+
+    Every figure that puts a unit or a Kilosort channel beside raw data reads
+    the recording column the sort's ``channel_map.npy`` names
+    (``KilosortResults.channel_map``), and is skipped with the reason when
+    that map does not fit the recording.
     """
     sorting_dir = Path(sorting_dir)
     out_dir = Path(out_dir)
@@ -156,20 +171,29 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
     if lf_path is None:
         lf_path = find_recording(sorting_dir, "lf")
 
-    # The gain lives in the recording's meta, and every microvolt axis needs it.
-    scale = None
-    if raw_path is not None:
-        meta_path = Path(raw_path).with_suffix(".meta")
-        if meta_path.exists():
-            scale = uv_per_bit(parse_meta(meta_path), "ap")
+    # The gain lives in the recording's meta, and every microvolt axis needs
+    # it; or the caller's, where the meta states none or there is no raw file.
+    scale, scale_problem = None, None
+    meta_path = Path(raw_path).with_suffix(".meta") if raw_path is not None else None
+    try:
+        if meta_path is not None and meta_path.exists():
+            scale = resolve_uv_per_bit(parse_meta(meta_path), "ap", uv_per_bit)
+        elif uv_per_bit is not None:
+            scale = resolve_uv_per_bit({}, "ap", uv_per_bit)
+    except RawError as exc:
+        scale_problem = str(exc)
 
     ks = KilosortResults.load(sorter_output, uv_per_bit=scale,
                               label=label_from_path(sorting_dir))
 
     rec = lf_rec = None
+    raw_problem = scale_problem
     try:
-        if raw_path is not None:
-            rec = RawRecording.open(raw_path)
+        if raw_path is not None and scale_problem is None:
+            try:
+                rec = RawRecording.open(raw_path, uv_per_bit=uv_per_bit)
+            except RawError as exc:
+                raw_problem = str(exc)
         if lf_path is not None:
             lf_rec = RawRecording.open(lf_path)
 
@@ -195,8 +219,9 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
 
         # ---- sorter-only figures
         if scale is None:
-            reason = ("no recording meta found, so microvolts are unknown; "
-                      "amplitude figures need it")
+            reason = (f"microvolts are unknown: {scale_problem}" if scale_problem
+                      else "no recording meta found, so microvolts are unknown; "
+                           "amplitude figures need it")
             for name in ("amp_depth_scatter", "unit_drift", "drift_map",
                          "amplitude_cdf_over_depth", "firing_rate_image",
                          "depth_profiles", "depth_correlation",
@@ -226,32 +251,49 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
 
         # ---- figures that need the raw file
         if rec is None:
-            reason = "no archived recording found for this shank"
+            reason = (f"the archived recording was not opened: {raw_problem}"
+                      if raw_problem else "no archived recording found for this shank")
             for name in ("wall_heatmap", "raw_traces", "raw_with_spikes",
                          "channel_health", "filter_state", "band_rms",
                          "example_neurons"):
                 result.skipped[name] = reason
         else:
+            # Units and Kilosort channels beside the raw traces: checked once,
+            # so a sort and a file that do not fit cost those two figures with
+            # the reason, rather than drawing "No snippets" panels.
+            try:
+                plots.sorted_columns(rec, ks)
+                pairing = None
+            except Exception as exc:  # noqa: BLE001 - recorded as the reason
+                pairing = f"{type(exc).__name__}: {exc}"
             _attempt(result, "wall_heatmap", lambda: _wall_heatmap(
                 rec, sorting_dir, artifact_z_um))
             _attempt(result, "raw_traces",
                      lambda: plots.raw_traces(rec, t_start_s=t_start_s))
-            _attempt(result, "raw_with_spikes", lambda: plots.raw_with_spikes(
-                rec, ks, t_start_s=t_start_s))
+            if pairing:
+                result.skipped["raw_with_spikes"] = pairing
+            else:
+                _attempt(result, "raw_with_spikes", lambda: plots.raw_with_spikes(
+                    rec, ks, t_start_s=t_start_s))
             _attempt(result, "channel_health",
                      lambda: plots.plot_channel_health(rec))
             _attempt(result, "filter_state",
                      lambda: plots.filter_state(rec)[0])
             _attempt(result, "band_rms",
                      lambda: plots.band_rms(rec, lf_rec=lf_rec))
-            _attempt(result, "example_neurons",
-                     lambda: plots.example_neurons(rec, ks))
+            if pairing:
+                result.skipped["example_neurons"] = pairing
+            else:
+                _attempt(result, "example_neurons",
+                         lambda: plots.example_neurons(rec, ks))
 
         power_rec = lf_rec or rec
         if power_rec is None:
-            result.skipped["depth_power"] = "no recording found for this shank"
-            result.skipped["lfp_band_profiles"] = "no recording for this shank"
-            result.skipped["depth_power_wide"] = "no recording for this shank"
+            why = (f"the archived recording was not opened: {raw_problem}"
+                   if raw_problem else None)
+            result.skipped["depth_power"] = why or "no recording found for this shank"
+            result.skipped["lfp_band_profiles"] = why or "no recording for this shank"
+            result.skipped["depth_power_wide"] = why or "no recording for this shank"
         else:
             safe_start = min(t_start_s, power_rec.duration_s - 11)
             _attempt(result, "depth_power", lambda: plots.depth_power(
@@ -267,6 +309,10 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                          lambda: plots.depth_power_wide(
                              rec, t_start_s=min(t_start_s,
                                                 rec.duration_s - 5)))
+            else:
+                result.skipped["depth_power_wide"] = (
+                    f"the archived AP recording was not opened: {raw_problem}"
+                    if raw_problem else "no AP recording for this shank")
 
         # ---- phy columns
         if write_phy and scale is not None:

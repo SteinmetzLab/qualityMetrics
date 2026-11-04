@@ -21,10 +21,28 @@ from .metrics import (
 )
 from .raw import Geometry, RawError, RawRecording, find_band, parse_meta
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
+
+#: What this version can do that a caller may need to know before relying on
+#: it, checked by name, since a machine can lag behind main:
+#:
+#: ``"ks_channel_map"``: every figure that reads the raw file for a Kilosort
+#: channel reads the column ``channel_map.npy`` names
+#: (``KilosortResults.channel_map``), and refuses a map that does not fit the
+#: recording. Before 2.3.0 they took Kilosort's channel number for the column,
+#: wrong whenever channels were left out of the sort.
+#:
+#: ``"uv_per_bit_override"``: ``build_report``, ``RawRecording.open`` and
+#: ``qm report`` take ``uv_per_bit`` for a meta that states no gain, and
+#: refuse one that disagrees with a meta that does.
+#:
+#: ``"shank_map_geometry"``: site positions from ``~snsShankMap`` where a meta
+#: has no ``~snsGeomMap`` (SpikeGLX 20201024), for the Neuropixels 2.0 parts
+#: or a meta stating its pitch.
+FEATURES = frozenset({"ks_channel_map", "uv_per_bit_override", "shank_map_geometry"})
 
 __all__ = [
-    "Geometry", "KilosortResults", "KsError", "RawError", "RawRecording",
+    "FEATURES", "Geometry", "KilosortResults", "KsError", "RawError", "RawRecording",
     "find_band", "label_from_path", "noise_cutoff", "noise_cutoff_per_unit",
     "parse_meta", "sliding_rp", "use_lab_style", "write_cluster_tsv",
     "write_phy_metrics",

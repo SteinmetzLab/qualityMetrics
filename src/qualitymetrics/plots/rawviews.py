@@ -30,6 +30,58 @@ def _depth_order(rec):
     return order, y[order]
 
 
+#: How far apart, in depth, a Kilosort channel and the recording column its
+#: channel map names may be before the two are taken to describe different
+#: sites. Both come from the same meta's positions when they belong together,
+#: so anything above rounding is a map, or a file, that does not fit.
+DEPTH_TOLERANCE_UM = 0.5
+
+
+def sorted_columns(rec, ks) -> np.ndarray:
+    """The recording column of each of Kilosort's channels, checked against rec.
+
+    ``ks.channel_map`` (``channel_map.npy``), the identity when the sort has
+    none. Raises ``ValueError`` when it does not fit this recording: a column
+    the file does not have, or, where the recording knows its sites' depths, a
+    Kilosort channel whose depth is not its column's. The second check is what
+    catches a map and a file that do not belong together, which a figure would
+    otherwise hide: it would still show plausible spikes, only not this unit's.
+    """
+    columns = ks.channel_map
+    n = rec.n_data_channels
+    if columns.size and columns.max() >= n:
+        raise ValueError(f"the sort's channel_map.npy names column "
+                         f"{int(columns.max())} and this recording has {n} "
+                         f"data channels")
+    geom = rec.geometry
+    if geom is not None and columns.size:
+        ks_depth = np.asarray(ks.channel_positions, dtype=float)[:, 1]
+        off = np.abs(geom.y[columns] - ks_depth)
+        bad = off > DEPTH_TOLERANCE_UM
+        if bad.any():
+            worst = int(np.argmax(off))
+            raise ValueError(
+                f"{int(bad.sum())} of {columns.size} Kilosort channels are not at "
+                f"the depth of the recording column their channel map names "
+                f"(channel {worst} at {ks_depth[worst]:.1f} um, column "
+                f"{int(columns[worst])} at {geom.y[columns[worst]]:.1f} um), so "
+                f"the sort and this recording do not fit together")
+        # Across the shank by rank, not value: the same sites read 27 and
+        # 59 um from ~snsGeomMap, 0 and 32 from ~snsShankMap, and with the
+        # shank's offset added by some pipelines. Two columns swapped within
+        # a row keep every depth and would draw each under the other.
+        ks_x = np.unique(np.round(np.asarray(ks.channel_positions, float)[:, 0], 3),
+                         return_inverse=True)
+        rec_x = np.unique(np.round(geom.x[columns], 3), return_inverse=True)
+        if ks_x[0].size == rec_x[0].size and not np.array_equal(
+                ks_x[1].ravel(), rec_x[1].ravel()):
+            raise ValueError(
+                "Kilosort's channels are not on the same side of the shank as the "
+                "recording columns their channel map names, so the sort and this "
+                "recording do not fit together")
+    return columns
+
+
 def _filtered_window(rec, t_start_s, win_ms, highpass_hz, cmr, channels):
     """Filter over the whole shank, then return only the requested channels.
 
@@ -418,6 +470,13 @@ def raw_with_spikes(rec, ks, t_start_s: float = 100.0, win_ms: float = 50.0,
     from .drift import _golden_angle_colors
     use_lab_style()
 
+    # Units are placed by depth, the sorter's against the recording's, so the
+    # two must be the same sites; and without the recording's depths there is
+    # nothing to place them against (channel numbers are not micrometres).
+    if rec.geometry is None:
+        raise ValueError("this recording's meta gives no site positions, so the "
+                         "sorter's spikes cannot be placed on its traces")
+    sorted_columns(rec, ks)
     order, depths = _depth_order(rec)
     if depth_range_um is not None:
         lo, hi = depth_range_um
@@ -495,11 +554,14 @@ def spike_snippets(rec, ks, unit_id: int, n_waveforms: int = 100,
 
     Returns (t_ms, stack, chans), where stack is
     (n_snippets, n_samples, n_channels) in microvolts and chans is ordered
-    shallow to deep.
+    shallow to deep. chans are Kilosort's channel numbers, which index its
+    templates and ``channel_positions``; the samples are read from the
+    recording columns its channel map names for them (:func:`sorted_columns`).
 
     Separated from the plotting so the standalone figure and the example-neuron
     grid extract snippets exactly the same way.
     """
+    columns = sorted_columns(rec, ks)
     st = ks.spike_times_s[ks.spike_clusters == unit_id]
     if st.size == 0:
         raise ValueError(f"unit {unit_id} has no spikes")
@@ -519,7 +581,7 @@ def spike_snippets(rec, ks, unit_id: int, n_waveforms: int = 100,
     for t in take:
         if t - half < 0 or t + half > rec.duration_s:
             continue
-        block = rec.get_traces(t - half, t + half, channels=chans)
+        block = rec.get_traces(t - half, t + half, channels=columns[chans])
         if highpass_hz:
             # No common reference on a snippet: the six channels here are all
             # neighbours of the same spike, so referencing them against each

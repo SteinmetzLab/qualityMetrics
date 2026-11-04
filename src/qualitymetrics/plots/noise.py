@@ -84,7 +84,7 @@ SNIPPET_LIMITS_UV = 50.0
 SNIPPET_SAMPLES = 1000
 
 
-def adc_groups(n_channels: int) -> np.ndarray:
+def adc_groups(n_channels: int, columns=None) -> np.ndarray:
     """Group id per channel: channels with the same id are sampled together.
 
     NP2 multiplexes 24 ADCs over a shank's 384 channels, each ADC reading 16 in
@@ -92,13 +92,25 @@ def adc_groups(n_channels: int) -> np.ndarray:
     of 32, halved, is which instant: the same rule as SortingManager's
     inter_sample_shift and ibl-neuropixel's trace_header(version=2), and the
     same grouping as the original MATLAB's hard-coded ADC table.
+
+    ``columns`` is each channel's acquired channel number (``AP<n>`` in the
+    meta's ``~snsChanMap``), when the channels are not a shank's channels 0
+    to n-1 in order: a sort that left channels out
+    (``KilosortResults.channel_map``), or a shank file of a probe whose
+    shanks share one SY word, whose column 48 can be AP96. The instant is the
+    acquired channel's, not the position in the block.
     """
-    return (np.arange(n_channels) % ADC_BLOCK) // 2
+    if columns is None:
+        columns = np.arange(n_channels)
+    columns = np.asarray(columns, dtype=np.int64)
+    if columns.size != n_channels:
+        raise ValueError(f"{columns.size} columns for {n_channels} channels")
+    return (columns % ADC_BLOCK) // 2
 
 
-def _group_median(x: np.ndarray) -> np.ndarray:
+def _group_median(x: np.ndarray, columns=None) -> np.ndarray:
     """Each channel's ADC-group median, sample by sample, shaped like ``x``."""
-    groups = adc_groups(x.shape[1])
+    groups = adc_groups(x.shape[1], columns)
     counts = np.bincount(groups)
     if counts.min() == counts.max():
         # Every group the same size (a full shank): one median over a
@@ -113,14 +125,17 @@ def _group_median(x: np.ndarray) -> np.ndarray:
     return out
 
 
-def _referenced(block_uv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Raw (channel medians removed), + global CAR, + demux CAR; unfiltered."""
+def _referenced(block_uv: np.ndarray, columns=None
+                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Raw (channel medians removed), + global CAR, + demux CAR; unfiltered.
+
+    ``columns``: as :func:`adc_groups` takes it."""
     x = np.asarray(block_uv, dtype=np.float32)
     # The per-channel offset from every tenth sample: an offset estimate, and
     # a tenth of the cost of the one step that dominated this function.
     raw = x - np.median(x[::10], axis=0, keepdims=True)
     global_car = raw - np.median(raw, axis=1, keepdims=True)
-    demux = global_car - _group_median(global_car)
+    demux = global_car - _group_median(global_car, columns)
     return raw, global_car, demux
 
 
@@ -131,20 +146,24 @@ def _band_pass(x: np.ndarray, fs: float) -> np.ndarray:
     return signal.sosfiltfilt(sos, x, axis=0).astype(np.float32)
 
 
-def processing_stages(block_uv: np.ndarray, fs: float, *, margin: int = 0) -> list:
+def processing_stages(block_uv: np.ndarray, fs: float, *, margin: int = 0,
+                      columns=None) -> list:
     """The four stages of one block, (samples, channels) microvolts.
 
     ``margin`` samples at each end are used by the filter and then dropped.
+    ``columns``: each channel's column in the shank file, as
+    :func:`adc_groups` takes it.
     """
-    raw, global_car, demux = _referenced(block_uv)
+    raw, global_car, demux = _referenced(block_uv, columns)
     keep = slice(margin, raw.shape[0] - margin if margin else None)
     return [x[keep] for x in (raw, _band_pass(raw, fs), _band_pass(global_car, fs),
                               _band_pass(demux, fs))]
 
 
-def demux_band(block_uv: np.ndarray, fs: float, *, margin: int = 0) -> np.ndarray:
+def demux_band(block_uv: np.ndarray, fs: float, *, margin: int = 0,
+               columns=None) -> np.ndarray:
     """Only the last stage, for the RMS over time, which needs nothing else."""
-    demux = _referenced(block_uv)[2]
+    demux = _referenced(block_uv, columns)[2]
     keep = slice(margin, demux.shape[0] - margin if margin else None)
     return _band_pass(demux, fs)[keep]
 
@@ -190,13 +209,18 @@ def _windows(total: int, fs: float, fractions, width: int, margin: int) -> list[
 
 
 def pipeline_windows(shank, *, n_channels: int, fs: float, width: int,
-                     margin: int):
+                     margin: int, columns=None):
     """The pipeline's destriped windows for this shank, or why there are none.
 
     Returns ``(starts, blocks_uv, None)`` or ``(None, None, reason)``. Blocks
     are (samples, channels) microvolts with ``margin`` on either side. Refused
     rather than stretched to fit when the file does not describe the same
     channels, rate and window length as the rest of the figure.
+
+    ``columns`` is the shank file's column of each sorted channel
+    (``KilosortResults.channel_map``). Where the file names its channels by
+    column, they must be those, and are put in that order; a file that names
+    them another way is matched by count, as before.
     """
     kept = load_destriped_windows(shank.directory)
     if kept is None:
@@ -209,6 +233,12 @@ def pipeline_windows(shank, *, n_channels: int, fs: float, width: int,
     if traces.shape[2] != n_channels:
         return None, None, (f"kept {traces.shape[2]} channels, the sort has "
                             f"{n_channels}")
+    if columns is not None and kept.channels is not None:
+        columns = np.asarray(columns, dtype=np.int64)
+        if not np.array_equal(np.sort(kept.channels), np.sort(columns)):
+            return None, None, "kept other channels than the sort's"
+        position = {int(c): i for i, c in enumerate(kept.channels)}
+        traces = traces[:, :, [position[int(c)] for c in columns]]
     if traces.shape[1] != width + 2 * kept_margin or kept_margin < margin:
         return None, None, "kept windows are not the length drawn here"
     trim = kept_margin - margin
@@ -227,7 +257,7 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
     """
     from scipy import signal
 
-    from .session import _ap_paths
+    from .session import _ap_paths, file_layout, sorted_file_columns
 
     if reader_factory is None:
         import mtscomp
@@ -246,25 +276,34 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
         if n_stored < n_ap:
             raise ValueError(f"{shank.label}: the file stores {n_stored} channels "
                              f"but the geometry describes {n_ap}")
+        n_data, acquired = file_layout(shank, n_ap, n_stored)
+        columns = sorted_file_columns(shank, n_ap, n_stored, n_data)
+        # The ADC instant is the acquired channel's (AP<n>), which is the file
+        # column only while the file holds one shank's channels in order.
+        instants = acquired[columns] if acquired is not None else columns
         fs = float(shank.ks.fs)
         width = int(round(WINDOW_S * fs))
         margin = int(round(MARGIN_S * fs))
 
         def read(start: int) -> np.ndarray:
-            # The trailing stored channel is the SY sync word, never a signal.
+            # The sorted channels' columns, which are not the first n_ap once
+            # the sort left any out. The trailing stored channel is the SY
+            # sync word, never sorted, so never among them.
             rows = np.asarray(reader[start - margin:start + width + margin],
-                              dtype=np.float32)[:, :n_ap]
+                              dtype=np.float32)[:, columns]
             return rows * shank.ks.uv_per_bit
 
         # At the pipeline's own times when it kept any, so all five rows are
         # the same seconds; it chose them at the same fractions anyway.
         starts, blocks, pipeline_note = pipeline_windows(
-            shank, n_channels=n_ap, fs=fs, width=width, margin=margin)
+            shank, n_channels=n_ap, fs=fs, width=width, margin=margin,
+            columns=columns)
         if starts is None:
             starts = _windows(total, fs, WINDOW_FRACTIONS, width, margin)
         detail = []
         for i, start in enumerate(starts):
-            stages = processing_stages(read(start), fs, margin=margin)
+            stages = processing_stages(read(start), fs, margin=margin,
+                                       columns=instants)
             stages.append(None if blocks is None
                           else _band_pass(blocks[i], fs)[margin:margin + width])
             detail.append(stages)
@@ -298,7 +337,7 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
         times, over_time = [], []
         fractions = np.linspace(0.05, 0.95, N_TIME_WINDOWS)
         for start in _windows(total, fs, fractions, width, margin):
-            demux = demux_band(read(start), fs, margin=margin)
+            demux = demux_band(read(start), fs, margin=margin, columns=instants)
             over_time.append(float(np.median(np.sqrt(np.mean(
                 demux.astype(np.float64) ** 2, axis=0)))))
             times.append((start + width / 2) / fs)

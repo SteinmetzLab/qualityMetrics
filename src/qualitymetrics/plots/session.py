@@ -315,7 +315,14 @@ def find_session_shanks(session_dir: str | Path) -> SessionSorts:
             found.incomplete.append(f"{entry.name} (provenance unreadable: {exc})")
             continue
         recording = provenance.get("recording", {})
-        gain = provenance.get("gain_to_uv", recording.get("uv_per_bit"))
+        if not isinstance(recording, dict):
+            recording = {}
+        # The recording's own uV/bit first, where the sort recorded it: None
+        # there means the sort had none, and SortingManager's gain_to_uv is
+        # then a placeholder 1.0, not a gain. gain_to_uv for a sort that
+        # recorded only that.
+        gain = (recording["uv_per_bit"] if "uv_per_bit" in recording
+                else provenance.get("gain_to_uv"))
         if gain is None:
             # Every voltage in the noise figure would otherwise be ADC counts
             # wearing a microvolt label.
@@ -384,6 +391,71 @@ def _ap_paths(shank: SessionShank) -> tuple[Path, Path]:
     return matches[0], matches[0].with_suffix(".ch")
 
 
+def _shank_meta(shank) -> dict | None:
+    """The archived AP file's meta, or None where there is none to read."""
+    from ..raw import parse_meta
+
+    try:
+        cbin, _ch = _ap_paths(shank)
+        meta_path = cbin.with_suffix(".meta")
+        return parse_meta(meta_path) if meta_path.exists() else None
+    except Exception:  # noqa: BLE001 - the layout is then assumed, as before
+        return None
+
+
+def file_layout(shank, n_ap: int, n_stored: int) -> tuple[int, np.ndarray | None]:
+    """``(data columns, acquired channel of each)`` of the shank's AP file.
+
+    From its meta: ``snsApLfSy`` for how many stored columns carry voltage,
+    and ``~snsChanMap``'s ``AP<n>`` for which acquired channel each is. The
+    acquired channel decides a channel's ADC instant: on a probe whose shanks
+    share one SY word (NP2014, NP2010) a shank file's column 48 can be AP96,
+    sampled with AP0, not with column 16. Without a meta, every stored column
+    but a trailing SY word, and no acquired channels.
+    """
+    meta = _shank_meta(shank)
+    n_data = n_stored - 1 if n_stored > n_ap else n_stored
+    acquired = None
+    if meta is not None:
+        try:
+            n_data = int(meta["snsApLfSy"].split(",")[0])
+        except (KeyError, ValueError, IndexError):
+            pass
+        from ..raw import paren_entries
+
+        names = [re.match(r"^AP(\d+);", entry) for entry
+                 in paren_entries(meta.get("~snsChanMap", ""))[1:]]
+        names = [int(m.group(1)) for m in names if m]
+        if len(names) == n_data:
+            acquired = np.asarray(names, dtype=np.int64)
+    return n_data, acquired
+
+
+def sorted_file_columns(shank, n_ap: int, n_stored: int,
+                        n_data: int | None = None) -> np.ndarray:
+    """The shank file's column of each channel the sort has a position for.
+
+    ``shank.ks.channel_map`` (``channel_map.npy``): the first ``n_ap`` columns
+    only while no channel was left out of the sort. Reading those instead put
+    every site's noise at another site's depth (a bad channel, a brain edge,
+    an NP2010's reference channel). The identity for a ``ks`` without one.
+    ``n_data``: the file's columns that carry voltage (:func:`file_layout`);
+    a map naming any other, the SY word, is refused.
+    """
+    columns = getattr(shank.ks, "channel_map", None)
+    columns = (np.arange(n_ap, dtype=np.int64) if columns is None
+               else np.asarray(columns, dtype=np.int64))
+    if n_data is None:
+        n_data = n_stored - 1 if n_stored > n_ap else n_stored
+    if columns.size != n_ap:
+        raise ValueError(f"{shank.label}: channel_map.npy has {columns.size} "
+                         f"entries for {n_ap} channel positions")
+    if columns.size and (columns.min() < 0 or columns.max() >= min(n_data, n_stored)):
+        raise ValueError(f"{shank.label}: channel_map.npy names column "
+                         f"{int(columns.max())} and the file has {n_data} data columns")
+    return columns
+
+
 def channel_rms(shank: SessionShank, *, n_windows: int = NOISE_WINDOWS,
                 window_s: float = NOISE_WINDOW_S) -> dict:
     """Per-site AP band RMS for one shank, in microvolts.
@@ -412,6 +484,8 @@ def channel_rms(shank: SessionShank, *, n_windows: int = NOISE_WINDOWS,
             raise ValueError(
                 f"{shank.label}: the AP file stores {n_stored} channels but the "
                 f"geometry describes {n_ap}. Refusing to guess which is which.")
+        columns = sorted_file_columns(shank, n_ap, n_stored,
+                                      file_layout(shank, n_ap, n_stored)[0])
 
         fs = float(shank.ks.fs)
         per_window = int(round(window_s * fs))
@@ -424,10 +498,11 @@ def channel_rms(shank: SessionShank, *, n_windows: int = NOISE_WINDOWS,
         sos = signal.butter(3, SPIKE_BAND_HZ, "hp", fs=fs, output="sos")
         common_rms, residual_rms, raw_rms = [], [], []
         for begin in starts:
-            # The trailing stored channel is the SY sync word, a bit field
-            # rather than a signal, so it is never part of a noise estimate.
+            # The sorted channels' columns. The trailing stored channel is the
+            # SY sync word, a bit field rather than a signal, never sorted, so
+            # never among them.
             block = np.asarray(reader[begin:begin + per_window],
-                               dtype=np.float32)[:, :n_ap] * shank.ks.uv_per_bit
+                               dtype=np.float32)[:, columns] * shank.ks.uv_per_bit
             block = signal.sosfiltfilt(sos, block, axis=0)
             common = np.median(block, axis=1)
             common_rms.append(float(np.sqrt(np.mean(common ** 2))))
