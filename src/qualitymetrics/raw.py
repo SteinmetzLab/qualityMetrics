@@ -90,14 +90,7 @@ def geometry_from_meta(meta: dict[str, str]) -> Geometry:
     depth without any error.
     """
     if "~snsGeomMap" in meta:
-        entries = paren_entries(meta["~snsGeomMap"])[1:]  # [0] is the header
-        rows = [e.split(":") for e in entries]
-        return Geometry(
-            x=np.array([float(r[1]) for r in rows]),
-            y=np.array([float(r[2]) for r in rows]),
-            shank=np.array([int(r[0]) for r in rows]),
-            used=np.array([bool(int(r[3])) for r in rows]),
-        )
+        return _sites(meta["~snsGeomMap"], "~snsGeomMap", 1.0, 1.0)
     if "~snsShankMap" not in meta:
         raise RawError(
             "meta has neither ~snsGeomMap nor ~snsShankMap, so channel "
@@ -118,14 +111,25 @@ def geometry_from_meta(meta: dict[str, str]) -> Geometry:
             f"pitch, and {part or 'its probe'} is not a Neuropixels 2.0 part "
             f"whose pitch is known, so channel positions are unknown. Pass "
             f"geometry explicitly.")
-    entries = paren_entries(meta["~snsShankMap"])[1:]  # [0] is the header
-    rows = [e.split(":") for e in entries]
-    return Geometry(
-        x=np.array([int(r[1]) * x_pitch for r in rows], dtype=float),
-        y=np.array([int(r[2]) * z_pitch for r in rows], dtype=float),
-        shank=np.array([int(r[0]) for r in rows]),
-        used=np.array([bool(int(r[3])) for r in rows]),
-    )
+    return _sites(meta["~snsShankMap"], "~snsShankMap", x_pitch, z_pitch)
+
+
+def _sites(value: str, key: str, x_scale: float, z_scale: float) -> Geometry:
+    """Entries ``shank:x:z:used`` after the header, x and z times the scales.
+
+    A malformed entry raises RawError, which every caller already takes as
+    "positions unknown", rather than whatever the parse raised.
+    """
+    try:
+        rows = [e.split(":") for e in paren_entries(value)[1:]]  # [0] is the header
+        return Geometry(
+            x=np.array([float(r[1]) * x_scale for r in rows], dtype=float),
+            y=np.array([float(r[2]) * z_scale for r in rows], dtype=float),
+            shank=np.array([int(r[0]) for r in rows]),
+            used=np.array([bool(int(r[3])) for r in rows]),
+        )
+    except (ValueError, IndexError) as exc:
+        raise RawError(f"meta's {key} is malformed: {exc}") from exc
 
 
 def uv_per_bit(meta: dict[str, str], band: str = "ap") -> float:

@@ -66,6 +66,19 @@ def sorted_columns(rec, ks) -> np.ndarray:
                 f"(channel {worst} at {ks_depth[worst]:.1f} um, column "
                 f"{int(columns[worst])} at {geom.y[columns[worst]]:.1f} um), so "
                 f"the sort and this recording do not fit together")
+        # Across the shank by rank, not value: the same sites read 27 and
+        # 59 um from ~snsGeomMap, 0 and 32 from ~snsShankMap, and with the
+        # shank's offset added by some pipelines. Two columns swapped within
+        # a row keep every depth and would draw each under the other.
+        ks_x = np.unique(np.round(np.asarray(ks.channel_positions, float)[:, 0], 3),
+                         return_inverse=True)
+        rec_x = np.unique(np.round(geom.x[columns], 3), return_inverse=True)
+        if ks_x[0].size == rec_x[0].size and not np.array_equal(
+                ks_x[1].ravel(), rec_x[1].ravel()):
+            raise ValueError(
+                "Kilosort's channels are not on the same side of the shank as the "
+                "recording columns their channel map names, so the sort and this "
+                "recording do not fit together")
     return columns
 
 

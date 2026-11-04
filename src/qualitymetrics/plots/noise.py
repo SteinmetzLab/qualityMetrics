@@ -93,10 +93,12 @@ def adc_groups(n_channels: int, columns=None) -> np.ndarray:
     inter_sample_shift and ibl-neuropixel's trace_header(version=2), and the
     same grouping as the original MATLAB's hard-coded ADC table.
 
-    ``columns`` is the shank file's column of each channel, when the channels
-    are not its first ``n_channels`` in order (a sort that left channels out:
-    ``KilosortResults.channel_map``). The instant is the column's, not the
-    position in the block.
+    ``columns`` is each channel's acquired channel number (``AP<n>`` in the
+    meta's ``~snsChanMap``), when the channels are not a shank's channels 0
+    to n-1 in order: a sort that left channels out
+    (``KilosortResults.channel_map``), or a shank file of a probe whose
+    shanks share one SY word, whose column 48 can be AP96. The instant is the
+    acquired channel's, not the position in the block.
     """
     if columns is None:
         columns = np.arange(n_channels)
@@ -255,7 +257,7 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
     """
     from scipy import signal
 
-    from .session import _ap_paths, sorted_file_columns
+    from .session import _ap_paths, file_layout, sorted_file_columns
 
     if reader_factory is None:
         import mtscomp
@@ -274,7 +276,11 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
         if n_stored < n_ap:
             raise ValueError(f"{shank.label}: the file stores {n_stored} channels "
                              f"but the geometry describes {n_ap}")
-        columns = sorted_file_columns(shank, n_ap, n_stored)
+        n_data, acquired = file_layout(shank, n_ap, n_stored)
+        columns = sorted_file_columns(shank, n_ap, n_stored, n_data)
+        # The ADC instant is the acquired channel's (AP<n>), which is the file
+        # column only while the file holds one shank's channels in order.
+        instants = acquired[columns] if acquired is not None else columns
         fs = float(shank.ks.fs)
         width = int(round(WINDOW_S * fs))
         margin = int(round(MARGIN_S * fs))
@@ -297,7 +303,7 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
         detail = []
         for i, start in enumerate(starts):
             stages = processing_stages(read(start), fs, margin=margin,
-                                       columns=columns)
+                                       columns=instants)
             stages.append(None if blocks is None
                           else _band_pass(blocks[i], fs)[margin:margin + width])
             detail.append(stages)
@@ -331,7 +337,7 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
         times, over_time = [], []
         fractions = np.linspace(0.05, 0.95, N_TIME_WINDOWS)
         for start in _windows(total, fs, fractions, width, margin):
-            demux = demux_band(read(start), fs, margin=margin, columns=columns)
+            demux = demux_band(read(start), fs, margin=margin, columns=instants)
             over_time.append(float(np.median(np.sqrt(np.mean(
                 demux.astype(np.float64) ** 2, axis=0)))))
             times.append((start + width / 2) / fs)

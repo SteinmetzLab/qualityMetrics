@@ -374,6 +374,76 @@ def test_shank_map_positions_take_the_metas_pitch_and_never_guess(tmp_path):
     path.write_text(_meta(geometry="shank", part="NP1000"), encoding="utf-8")
     with pytest.raises(RawError, match="pitch"):
         geometry_from_meta(parse_meta(path))
+    # One pitch stated is not both: the other is not guessed either.
+    for extra in (("imZPitch=20",), ("imXPitch=16",)):
+        path.write_text(_meta(geometry="shank", part="NP1000", extra=extra),
+                        encoding="utf-8")
+        with pytest.raises(RawError, match="pitch"):
+            geometry_from_meta(parse_meta(path))
+
+
+@pytest.mark.parametrize("geometry", ["shank", "geom"])
+def test_a_malformed_site_map_is_positions_unknown_not_a_crash(tmp_path, geometry):
+    text = _meta(geometry=geometry, part="NP2010").replace(":1)", ":x)", 1)
+    path = _recording(tmp_path)
+    path.with_suffix(".meta").write_text(text, encoding="utf-8")
+    with pytest.raises(RawError, match="malformed"):
+        geometry_from_meta(parse_meta(path.with_suffix(".meta")))
+    with RawRecording.open(path) as rec:
+        assert rec.geometry is None
+
+
+def test_two_columns_swapped_within_a_row_are_refused(tmp_path):
+    # Every depth is right; only the side of the shank is not.
+    rec = RawRecording.open(_recording(tmp_path))
+    swapped = CHANNEL_MAP.copy()
+    swapped[[0, 1]] = swapped[[1, 0]]
+    ks = KilosortResults.load(_sort(tmp_path, channel_map=swapped,
+                                    positions=[_site(c) for c in CHANNEL_MAP]))
+    with rec, pytest.raises(ValueError, match="same side"):
+        rawviews.sorted_columns(rec, ks)
+
+
+def test_a_session_sort_with_no_gain_is_not_read_with_the_placeholder(tmp_path):
+    """SortingManager writes gain_to_uv 1.0 for a sort with no gain, and says
+    so with recording.uv_per_bit None: never microvolts."""
+    import json
+
+    for shank, recording in ((0, {"uv_per_bit": None}), (1, {"uv_per_bit": UV}), (2, {})):
+        out = _sort(tmp_path / f"s{shank}")
+        (tmp_path / "sorting").mkdir(exist_ok=True)
+        sort = tmp_path / "sorting" / f"imec0_shank{shank}"
+        out.parent.rename(sort)
+        (sort / "provenance.json").write_text(json.dumps(
+            {"recording": recording, "gain_to_uv": 1.0 if shank == 0 else UV}))
+    found = S.find_session_shanks(tmp_path)
+    assert [s.shank for s in found.shanks] == [1, 2]
+    assert all(s.ks.uv_per_bit == UV for s in found.shanks)
+    assert any("imec0_shank0" in why for why in found.incomplete)
+
+
+def test_adc_instants_follow_the_acquired_channel(tmp_path, monkeypatch):
+    """A shank file of a probe whose shanks share one SY word: its columns are
+    AP channels taken from across the probe, and an ADC instant is the AP
+    channel's (file_layout reads them from ~snsChanMap)."""
+    acquired = np.array([0, 2, 1, 3, 4, 6, 5, 7, 8, 10, 9, 11, 12, 14, 13, 15]) + 96
+    path = _recording(tmp_path, extra=(
+        "~snsChanMap=(16,0,1)" + "".join(f"(AP{a};{c}:{c})" for c, a in
+                                         enumerate(acquired)) + "(SY0;16:16)",))
+    monkeypatch.setattr(S, "_ap_paths", lambda _s: (path.with_suffix(".cbin"), None))
+    shank = SimpleNamespace(label="imec0_shank0")
+    n_data, found = S.file_layout(shank, n_ap=15, n_stored=N_FILE + 1)
+    assert n_data == N_FILE and found.tolist() == acquired.tolist()
+    # A signal on one instant's channels (AP96 and AP97, columns 0 and 2):
+    # the demux stage removes it by acquired channel, and would leave half of
+    # it on column 0 grouped by column, beside column 1 (AP98).
+    t = np.arange(6000) / FS
+    block = np.random.default_rng(4).normal(0, 2, (6000, N_FILE)).astype(np.float32)
+    block[:, [0, 2]] += 200 * np.sin(2 * np.pi * 3000 * t)[:, None]
+    by_acquired = N.processing_stages(block, FS, margin=300, columns=found)[3]
+    by_column = N.processing_stages(block, FS, margin=300)[3]
+    assert np.sqrt(np.mean(by_acquired[:, 0] ** 2)) < 10
+    assert np.sqrt(np.mean(by_column[:, 0] ** 2)) > 50
 
 
 def test_an_np2010_shank_draws_its_unit_over_its_own_column(tmp_path, undrawn):
