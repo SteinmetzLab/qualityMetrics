@@ -106,6 +106,27 @@ there too. `qm report` reads both files from the sort folder; from Python, pass
 `cleaned=load_destriped_windows(sort_dir)` and
 `light_events=load_light_events(sort_dir)` (both in `qualitymetrics.pipelinefiles`).
 
+### Sorts that left channels out (2.3)
+
+Kilosort numbers the channels it sorted 0 to N-1, and `channel_map.npy` says
+which column of the recording each one is, which is how phy reads the raw file.
+When channels were left out of the sort (a bad channel, everything above a brain
+edge, an NP2010's reference channel), Kilosort's channel j is not column j. Every
+figure that reads the raw file for a Kilosort channel (`example_neurons`,
+`sample_waveforms`, `spike_snippets`, and the session noise figures) reads
+`KilosortResults.channel_map[j]`, and refuses a map that does not fit the
+recording: a column the file lacks, or a channel whose depth in
+`channel_positions.npy` is not its column's depth in the meta. Before 2.3 they
+read column j, which put a unit over another channel's trace.
+
+A meta with no gain (SpikeGLX 20201024 writes no `imChan0apGain`) opens with the
+caller's: `build_report(..., uv_per_bit=...)`, `RawRecording.open(...,
+uv_per_bit=...)` or `qm report --uv-per-bit`. Where the meta states a gain, the
+two must agree, or every microvolt and raw figure is skipped with the reason. A
+meta with no `~snsGeomMap` has its site positions from `~snsShankMap`, scaled by
+its own `imXPitch`/`imZPitch`, or for a Neuropixels 2.0 part by its fixed 32 and
+15 um. `qualitymetrics.FEATURES` names these, for a caller to check.
+
 ## Two things to know about the numbers
 
 **Amplitudes.** The Kilosort-2-era recipe for per-spike amplitude, `amplitudes.npy`

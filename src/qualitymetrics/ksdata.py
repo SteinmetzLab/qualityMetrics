@@ -184,8 +184,58 @@ class KilosortResults:
         return self._npy("channel_positions")
 
     @cached_property
+    def channel_map(self) -> np.ndarray:
+        """The recording column of each of Kilosort's channels, phy's convention.
+
+        Kilosort numbers the channels it sorted 0 to N-1: template columns,
+        ``channel_positions.npy`` rows and every peak channel are those
+        numbers. ``channel_map.npy`` says which column of the recording each
+        one is, and phy reads ``dat_path`` through it. The two differ whenever
+        channels were left out of the sort: SortingManager rewrites the map to
+        the archived shank file's columns (its ``ks4driver.rewrite_channel_map``)
+        after leaving out a bad channel, the channels above a brain edge, or
+        an NP2010's reference channel. Anything that reads the raw file for a
+        Kilosort channel must go through this, or it draws a unit over another
+        channel's trace.
+
+        Without a ``channel_map.npy`` the identity, Kilosort's own default.
+        Raises :class:`KsError` for a map that cannot be one: not one entry per
+        channel, not integers, negative, or naming a column twice.
+        """
+        n = int(self.channel_positions.shape[0])
+        path = self.path / "channel_map.npy"
+        if not path.exists():
+            return np.arange(n, dtype=np.int64)
+        mapping = np.load(path).ravel()
+        if mapping.size != n:
+            raise KsError(f"{self.path.name}: channel_map.npy has {mapping.size} "
+                          f"entries for {n} channels")
+        if not np.issubdtype(mapping.dtype, np.integer) and not np.array_equal(
+                mapping, np.round(mapping)):
+            raise KsError(f"{self.path.name}: channel_map.npy is not integers")
+        mapping = mapping.astype(np.int64)
+        if mapping.size and mapping.min() < 0:
+            raise KsError(f"{self.path.name}: channel_map.npy names a negative column")
+        if np.unique(mapping).size != mapping.size:
+            raise KsError(f"{self.path.name}: channel_map.npy names a column twice")
+        return mapping
+
+    @property
+    def channels_remapped(self) -> bool:
+        """Whether Kilosort's channel i is ever not the recording's column i."""
+        return not np.array_equal(self.channel_map, np.arange(self.channel_map.size))
+
+    def recording_columns(self, channels) -> np.ndarray:
+        """The recording's columns of Kilosort channels ``channels``."""
+        return self.channel_map[np.asarray(channels, dtype=np.int64)]
+
+    @cached_property
     def peak_channel(self) -> np.ndarray:
-        """Index of each template's largest-amplitude channel."""
+        """Index of each template's largest-amplitude channel.
+
+        A Kilosort channel; :meth:`recording_columns` gives its column in the
+        recording.
+        """
         unw = self.templates_unwhitened
         return np.ptp(unw, axis=1).argmax(axis=1)
 

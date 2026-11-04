@@ -384,6 +384,26 @@ def _ap_paths(shank: SessionShank) -> tuple[Path, Path]:
     return matches[0], matches[0].with_suffix(".ch")
 
 
+def sorted_file_columns(shank, n_ap: int, n_stored: int) -> np.ndarray:
+    """The shank file's column of each channel the sort has a position for.
+
+    ``shank.ks.channel_map`` (``channel_map.npy``): the first ``n_ap`` columns
+    only while no channel was left out of the sort. Reading those instead put
+    every site's noise at another site's depth (a bad channel, a brain edge,
+    an NP2010's reference channel). The identity for a ``ks`` without one.
+    """
+    columns = getattr(shank.ks, "channel_map", None)
+    columns = (np.arange(n_ap, dtype=np.int64) if columns is None
+               else np.asarray(columns, dtype=np.int64))
+    if columns.size != n_ap:
+        raise ValueError(f"{shank.label}: channel_map.npy has {columns.size} "
+                         f"entries for {n_ap} channel positions")
+    if columns.size and (columns.min() < 0 or columns.max() >= n_stored):
+        raise ValueError(f"{shank.label}: channel_map.npy names column "
+                         f"{int(columns.max())} and the file stores {n_stored}")
+    return columns
+
+
 def channel_rms(shank: SessionShank, *, n_windows: int = NOISE_WINDOWS,
                 window_s: float = NOISE_WINDOW_S) -> dict:
     """Per-site AP band RMS for one shank, in microvolts.
@@ -412,6 +432,7 @@ def channel_rms(shank: SessionShank, *, n_windows: int = NOISE_WINDOWS,
             raise ValueError(
                 f"{shank.label}: the AP file stores {n_stored} channels but the "
                 f"geometry describes {n_ap}. Refusing to guess which is which.")
+        columns = sorted_file_columns(shank, n_ap, n_stored)
 
         fs = float(shank.ks.fs)
         per_window = int(round(window_s * fs))
@@ -424,10 +445,11 @@ def channel_rms(shank: SessionShank, *, n_windows: int = NOISE_WINDOWS,
         sos = signal.butter(3, SPIKE_BAND_HZ, "hp", fs=fs, output="sos")
         common_rms, residual_rms, raw_rms = [], [], []
         for begin in starts:
-            # The trailing stored channel is the SY sync word, a bit field
-            # rather than a signal, so it is never part of a noise estimate.
+            # The sorted channels' columns. The trailing stored channel is the
+            # SY sync word, a bit field rather than a signal, never sorted, so
+            # never among them.
             block = np.asarray(reader[begin:begin + per_window],
-                               dtype=np.float32)[:, :n_ap] * shank.ks.uv_per_bit
+                               dtype=np.float32)[:, columns] * shank.ks.uv_per_bit
             block = signal.sosfiltfilt(sos, block, axis=0)
             common = np.median(block, axis=1)
             common_rms.append(float(np.sqrt(np.mean(common ** 2))))

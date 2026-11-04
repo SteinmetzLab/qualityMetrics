@@ -19,6 +19,9 @@ def _add_report(sub):
                    help="window start for the raw views, in seconds")
     p.add_argument("--no-phy", action="store_true",
                    help="do not write the cluster_*.tsv curation columns")
+    p.add_argument("--uv-per-bit", type=float, default=None,
+                   help="AP microvolts per bit, for a meta that states no gain; "
+                        "must agree with the meta's when it states one")
 
 
 def _add_phy(sub):
@@ -47,7 +50,7 @@ def main(argv=None) -> int:
         result = build_report(
             args.sorting_dir, args.out, raw_path=args.raw, lf_path=args.lf,
             artifact_z_um=args.artifact_z, t_start_s=args.t_start,
-            write_phy=not args.no_phy)
+            write_phy=not args.no_phy, uv_per_bit=args.uv_per_bit)
         print(result.summary())
         return 0
 

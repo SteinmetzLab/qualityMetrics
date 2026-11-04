@@ -65,19 +65,64 @@ class Geometry:
         return float(np.median(np.diff(uniq))) if uniq.size > 1 else float("nan")
 
 
+#: Column and row pitch of the Neuropixels 2.0 parts, for a meta that has only
+#: ``~snsShankMap`` (grid indices, not micrometres) and states no ``imXPitch``
+#: or ``imZPitch``. SpikeGLX 20201024, which recorded the lab's NP2010
+#: four-shank probes, writes such metas. Rows 15 um apart with both columns on
+#: each row, columns 32 um apart: the pitch SortingManager scales these metas
+#: by (its ``meta._parse_geom``), so a sort's ``channel_positions.npy`` and
+#: this geometry agree in depth. x is within the shank, as ~snsGeomMap's is.
+NP2_GRID_PITCH_UM = {"x": 32.0, "z": 15.0}
+#: The Neuropixels 2.0 parts that pitch is right for.
+NP2_PARTS = frozenset({"NP2000", "NP2003", "NP2004", "NP2010", "NP2013",
+                       "NP2014", "NP2020", "NP2021"})
+
+
 def geometry_from_meta(meta: dict[str, str]) -> Geometry:
-    """Geometry from ~snsGeomMap, whose entries are shank:x:z:used."""
-    if "~snsGeomMap" not in meta:
-        raise RawError(
-            "meta has no ~snsGeomMap, so channel positions are unknown. Pass "
-            "geometry explicitly, or take it from the sorter's "
-            "channel_positions.npy."
+    """Geometry from ~snsGeomMap, whose entries are shank:x:z:used.
+
+    A meta with no ~snsGeomMap (SpikeGLX before 2021) has ~snsShankMap, whose
+    entries are shank:col:row:used, grid indices rather than micrometres.
+    Those are scaled by the meta's own ``imXPitch`` and ``imZPitch`` when it
+    states them, and otherwise only for a Neuropixels 2.0 part
+    (:data:`NP2_PARTS`), whose pitch is fixed (:data:`NP2_GRID_PITCH_UM`).
+    Any other probe raises: a guessed pitch would put every channel at a wrong
+    depth without any error.
+    """
+    if "~snsGeomMap" in meta:
+        entries = paren_entries(meta["~snsGeomMap"])[1:]  # [0] is the header
+        rows = [e.split(":") for e in entries]
+        return Geometry(
+            x=np.array([float(r[1]) for r in rows]),
+            y=np.array([float(r[2]) for r in rows]),
+            shank=np.array([int(r[0]) for r in rows]),
+            used=np.array([bool(int(r[3])) for r in rows]),
         )
-    entries = paren_entries(meta["~snsGeomMap"])[1:]  # [0] is the header
+    if "~snsShankMap" not in meta:
+        raise RawError(
+            "meta has neither ~snsGeomMap nor ~snsShankMap, so channel "
+            "positions are unknown. Pass geometry explicitly, or take it from "
+            "the sorter's channel_positions.npy."
+        )
+    part = (meta.get("imDatPrb_pn") or "").strip().upper()
+    try:
+        x_pitch = (float(meta["imXPitch"]) if "imXPitch" in meta
+                   else NP2_GRID_PITCH_UM["x"] if part in NP2_PARTS else None)
+        z_pitch = (float(meta["imZPitch"]) if "imZPitch" in meta
+                   else NP2_GRID_PITCH_UM["z"] if part in NP2_PARTS else None)
+    except ValueError as exc:
+        raise RawError(f"meta states an unreadable site pitch: {exc}") from exc
+    if x_pitch is None or z_pitch is None:
+        raise RawError(
+            f"meta has only ~snsShankMap (grid indices) and states no site "
+            f"pitch, and {part or 'its probe'} is not a Neuropixels 2.0 part "
+            f"whose pitch is known, so channel positions are unknown. Pass "
+            f"geometry explicitly.")
+    entries = paren_entries(meta["~snsShankMap"])[1:]  # [0] is the header
     rows = [e.split(":") for e in entries]
     return Geometry(
-        x=np.array([float(r[1]) for r in rows]),
-        y=np.array([float(r[2]) for r in rows]),
+        x=np.array([int(r[1]) * x_pitch for r in rows], dtype=float),
+        y=np.array([int(r[2]) * z_pitch for r in rows], dtype=float),
         shank=np.array([int(r[0]) for r in rows]),
         used=np.array([bool(int(r[3])) for r in rows]),
     )
@@ -110,6 +155,42 @@ def uv_per_bit(meta: dict[str, str], band: str = "ap") -> float:
     return ai_range / max_int / gain * 1e6
 
 
+#: How far a caller's uV/bit may differ from the meta's, relative. Both come
+#: from the same range, integer depth and gain when they describe the same
+#: recording, so they agree to rounding; anything more is a wrong meta beside
+#: the file, or a wrong number from the caller.
+SCALE_RTOL = 1e-4
+
+
+def resolve_uv_per_bit(meta: dict[str, str], band: str = "ap",
+                       given: float | None = None) -> float:
+    """The recording's uV/bit: the meta's, or ``given`` where the meta has none.
+
+    ``given`` is for a meta that states no gain, such as SpikeGLX 20201024's,
+    which has no ``imChan0apGain``: the caller then knows it from elsewhere
+    (SortingManager takes it from the probe part and records it in the sort's
+    provenance). Where the meta does state one, the two must agree within
+    :data:`SCALE_RTOL`, or this raises. Neither silently wins, because one of
+    them is wrong and every microvolt in every figure would inherit whichever
+    was picked.
+    """
+    if given is not None:
+        given = float(given)
+        if not np.isfinite(given) or given <= 0:
+            raise RawError(f"uv_per_bit must be a positive number, not {given!r}")
+    try:
+        stated = uv_per_bit(meta, band)
+    except RawError:
+        if given is None:
+            raise
+        return given
+    if given is not None and abs(given - stated) > SCALE_RTOL * stated:
+        raise RawError(
+            f"uv_per_bit {given:.6g} disagrees with the {stated:.6g} the meta "
+            f"states; one of them does not describe this recording")
+    return stated
+
+
 # --------------------------------------------------------------------------
 # the recording
 # --------------------------------------------------------------------------
@@ -137,11 +218,15 @@ class RawRecording:
 
     @classmethod
     def open(cls, path: str | Path, meta_path: str | Path | None = None,
-             band: str | None = None) -> RawRecording:
+             band: str | None = None,
+             uv_per_bit: float | None = None) -> RawRecording:
         """Open a .cbin (compressed) or .bin/.raw (flat) recording.
 
         The sibling .meta is found automatically when it sits next to the data
         under the usual SpikeGLX name.
+
+        ``uv_per_bit`` is for a meta that states no gain. Where the meta states
+        one, the two must agree, or this raises (:func:`resolve_uv_per_bit`).
         """
         path = Path(path)
         if not path.exists():
@@ -157,7 +242,7 @@ class RawRecording:
 
         n_channels = int(meta["nSavedChans"])
         fs = float(meta["imSampRate"])
-        scale = uv_per_bit(meta, band)
+        scale = resolve_uv_per_bit(meta, band, uv_per_bit)
         try:
             geom = geometry_from_meta(meta)
         except RawError:
