@@ -181,10 +181,13 @@ def amplitude_cdf_over_depth(ks, depth_bin_um: float = 40.0,
                             z.max() + depth_bin_um, depth_bin_um)
     amp_edges = np.arange(0, max_amp_uv + amp_bin_uv, amp_bin_uv)
 
-    counts, _, _ = np.histogram2d(z, amps, bins=[depth_edges, amp_edges])
-    rate = counts / duration                        # spikes/s per bin
+    # Spikes past the axis still count toward the cumulative rate.
+    counts, _, _ = np.histogram2d(z, amps,
+                                  bins=[depth_edges, np.append(amp_edges, np.inf)])
+    rate_all = counts / duration                    # spikes/s per bin
     # Accumulate from the largest amplitude downwards: "at least this big".
-    survival = np.cumsum(rate[:, ::-1], axis=1)[:, ::-1]
+    survival = np.cumsum(rate_all[:, ::-1], axis=1)[:, ::-1][:, :-1]
+    rate = rate_all[:, :-1]
 
     fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
     extent = [amp_edges[0], amp_edges[-1], depth_edges[0], depth_edges[-1]]
