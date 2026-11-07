@@ -269,6 +269,30 @@ def test_depth_correlation_is_square_and_symmetric(ks):
     assert np.allclose(data, data.T, atol=1e-9)
 
 
+def test_depth_correlation_keeps_depths_when_a_middle_bin_is_empty(sorter_output):
+    z = np.load(sorter_output / "spike_positions.npy")
+    z[z[:, 1] == 60.0, 1] = 40.0          # empty the 60-80 µm bin
+    np.save(sorter_output / "spike_positions.npy", z)
+    ks = KilosortResults.load(sorter_output, uv_per_bit=UV_PER_BIT)
+    fig = plots.depth_correlation(ks, depth_bin_um=20, time_bin_s=0.2,
+                                  duration_s=4.0, min_spikes=1)
+    im = fig.axes[0].images[0]
+    data = im.get_array()
+    left, right, bottom, top = im.get_extent()
+    row_um = (top - bottom) / data.shape[0]
+    assert row_um == pytest.approx(20.0)
+    assert bool(np.ma.getmaskarray(data)[int((70 - bottom) // row_um)].all())
+    assert not np.ma.getmaskarray(data)[int((90 - bottom) // row_um)].all()
+
+
+def test_amplitude_cdf_counts_spikes_past_the_amplitude_axis(ks):
+    """The cumulative rate from the lowest amplitude counts every spike."""
+    fig = plots.amplitude_cdf_over_depth(ks, max_amp_uv=10.0)
+    survival = fig.axes[1].images[0].get_array().filled(0)
+    assert survival[:, 0].sum() * ks.duration_s == pytest.approx(
+        ks.spike_depths_um.size)
+
+
 def test_population_figures_build(ks, rec):
     assert plots.firing_rate_image(ks, time_bin_s=0.2, duration_s=4.0) is not None
     assert plots.depth_profiles(ks, duration_s=4.0, min_spikes=1) is not None
