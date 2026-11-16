@@ -96,6 +96,20 @@ Needing the archived recording:
 | `band_rms` | Activity over time and depth |
 | `depth_power` | Laminar structure in the power spectrum |
 
+Whole-session figures from `build_session_report`:
+
+| Figure | Question |
+| --- | --- |
+| `session_drift_traces` | How do the saved DREDGE displacement estimates compare across every shank? |
+| `session_raster_all_units` | When did every sorted unit fire across the session? |
+| `session_raster_passing` | When did the units passing QC fire? |
+| `session_rms_across_shanks` | Which shanks or channels are noisy? |
+
+`session_drift_traces` uses one row per probe and one column per shank. All
+panels share time and displacement limits, and trace color gives the DREDGE
+depth-window center, so excursions can be compared directly rather than hidden
+by per-panel scaling. It reads only the small `motion.npz` saved with each sort.
+
 ### The pages (2.5)
 
 `qm report` and `build_report` also write `index.html` beside the figures: every

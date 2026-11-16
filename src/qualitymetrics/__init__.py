@@ -21,7 +21,7 @@ from .metrics import (
 )
 from .raw import Geometry, RawError, RawRecording, find_band, parse_meta
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 #: What this version can do that a caller may need to know before relying on
 #: it, checked by name, since a machine can lag behind main:
@@ -42,8 +42,11 @@ __version__ = "2.5.0"
 #:
 #: ``"html_pages"``: ``build_report`` and ``build_session_report`` write an
 #: ``index.html`` over their figures (``qualitymetrics.pages``).
+#:
+#: ``"session_drift_traces"``: ``build_session_report`` reads each shank's
+#: saved DREDGE ``motion.npz`` and draws one comparable session summary.
 FEATURES = frozenset({"ks_channel_map", "uv_per_bit_override", "shank_map_geometry",
-                      "html_pages"})
+                      "html_pages", "session_drift_traces"})
 
 __all__ = [
     "FEATURES", "Geometry", "KilosortResults", "KsError", "RawError", "RawRecording",

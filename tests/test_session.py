@@ -29,7 +29,8 @@ def write_shank(session_dir, probe: int, shank: int, *, n_units: int = 6,
                 gain: float = 3.0, provenance: bool = True,
                 sorter_output: bool = True, verdicts: bool = True,
                 passing: int = 2, run: str | None = None,
-                source_run: str | None = None, trigger: str = "t0") -> None:
+                source_run: str | None = None, trigger: str = "t0",
+                motion: bool = True) -> None:
     """Writes one shank's sort output in SortingManager's layout.
 
     ``run`` such as ``p1_g0`` names the folder as SortingManager has since
@@ -58,6 +59,16 @@ def write_shank(session_dir, probe: int, shank: int, *, n_units: int = 6,
         }), encoding="utf-8")
     if not sorter_output:
         return
+
+    if motion:
+        temporal = np.linspace(0.5, N_SAMPLES / FS - 0.5, 12)
+        spatial = np.array([200.0, 600.0, 1000.0])
+        displacement = np.column_stack([
+            np.sin(temporal * np.pi) * (1 + probe + shank + depth / 1000)
+            for depth in spatial
+        ])
+        np.savez(directory / "motion.npz", displacement=displacement,
+                 temporal_bins_s=temporal, spatial_bins_um=spatial)
 
     out = directory / "kilosort4" / "sorter_output"
     out.mkdir(parents=True, exist_ok=True)
@@ -222,6 +233,53 @@ def test_a_filter_selects_only_the_units_asked_for(session):
 # --------------------------------------------------------------------------
 # The figures
 # --------------------------------------------------------------------------
+def test_session_drift_traces_draw_one_panel_per_shank_on_shared_axes(session):
+    shanks = S.find_session_shanks(session).shanks
+
+    figure = S.session_drift_traces(shanks)
+    panels = figure.axes[:-1]  # The last axes is the depth colorbar.
+
+    assert len(panels) == 4
+    assert all(len(axis.lines) == 4 for axis in panels)  # zero plus 3 depths
+    assert len({axis.get_xlim() for axis in panels}) == 1
+    assert len({axis.get_ylim() for axis in panels}) == 1
+
+
+def test_session_drift_traces_names_a_shank_with_no_motion_file(session):
+    missing = session / "sorting" / "imec1_shank1" / "motion.npz"
+    missing.unlink()
+    shanks = S.find_session_shanks(session).shanks
+
+    figure = S.session_drift_traces(shanks)
+
+    assert any("No motion.npz" in text.get_text()
+               for axis in figure.axes for text in axis.texts)
+
+
+def test_motion_saved_depth_by_time_is_turned_the_right_way(session):
+    shank = S.find_session_shanks(session).shanks[0]
+    path = shank.directory / "motion.npz"
+    with np.load(path) as saved:
+        displacement = saved["displacement"]
+        temporal = saved["temporal_bins_s"]
+        spatial = saved["spatial_bins_um"]
+    np.savez(path, displacement=displacement.T, temporal_bins_s=temporal,
+             spatial_bins_um=spatial)
+
+    motion = S.load_motion(shank)
+
+    np.testing.assert_array_equal(motion.displacement_um, displacement)
+
+
+def test_no_readable_motion_is_a_named_failure(session):
+    for path in (session / "sorting").glob("*/motion.npz"):
+        path.unlink()
+    shanks = S.find_session_shanks(session).shanks
+
+    with pytest.raises(ValueError, match="no shank has a readable motion.npz"):
+        S.session_drift_traces(shanks)
+
+
 def test_the_raster_draws_every_unit_by_default(session):
     shanks = S.find_session_shanks(session).shanks
 
@@ -273,11 +331,12 @@ def test_a_session_with_no_units_says_so_rather_than_drawing_nothing(tmp_path):
 # --------------------------------------------------------------------------
 # The report
 # --------------------------------------------------------------------------
-def test_the_report_makes_both_rasters(session, tmp_path):
+def test_the_report_makes_the_rasters_and_dredge_summary(session, tmp_path):
     result = build_session_report(session, tmp_path / "out", noise=False)
 
     assert "session_raster_all_units" in result.made
     assert "session_raster_passing" in result.made
+    assert "session_drift_traces" in result.made
     assert result.skipped["session_rms_across_shanks"] == "not requested"
 
 
@@ -310,7 +369,7 @@ def test_a_session_with_nothing_sorted_reports_instead_of_raising(tmp_path):
     result = build_session_report(tmp_path / "empty", tmp_path / "out")
 
     assert not result.made
-    assert len(result.skipped) == 3
+    assert len(result.skipped) == 4
 
 
 def test_every_quad_base_probe_and_shank_has_its_own_color():
