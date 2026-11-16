@@ -281,6 +281,20 @@ def test_the_report_makes_both_rasters(session, tmp_path):
     assert result.skipped["session_rms_across_shanks"] == "not requested"
 
 
+def test_the_report_writes_a_page_linking_every_sorted_shank(session, tmp_path):
+    out = tmp_path / "out"
+    result = build_session_report(session, out, noise=False)
+
+    text = (out / "index.html").read_text(encoding="utf-8")
+    assert result.made["index.html"] == str(out / "index.html")
+    assert "SUBJ_001 2026-08-19 001 - QC figures" in text
+    assert 'src="session_raster_all_units.png"' in text
+    # No shank figures drawn here, so every shank is named, by probe and shank.
+    for probe in (0, 1):
+        assert f"<th>imec{probe}</th>" in text
+    assert text.count("No figures") == 4
+
+
 def test_the_noise_figure_is_skipped_with_a_reason_when_the_files_are_absent(
         session, tmp_path):
     """No archived .cbin here, which is the ordinary case for a sort somebody

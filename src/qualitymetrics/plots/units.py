@@ -180,6 +180,25 @@ def _value_text(key: str, value: float) -> str:
             "width": f"{value:.2f} ms trough to peak"}[key]
 
 
+def template_sites(ks, unit_id: int, n_channels: int = 32):
+    """The sites a template panel shows, and the template on them.
+
+    Returns ``(chans, wave)``: the ``n_channels`` sites nearest the unit's
+    peak site by physical distance, nearest first, and the unwhitened
+    template on them, ``(n_samples, n_channels)``, in microvolts where the
+    gain is known and in the sorter's units otherwise. Shared by
+    :func:`templates_grid` and the HTML page's redrawn panels
+    (``qualitymetrics.pages``), so the two always show the same sites.
+    """
+    pos = np.asarray(ks.channel_positions, dtype=float)
+    pk = int(ks.peak_channel[unit_id])
+    # Nearest sites by physical distance, not by index: index order is a
+    # wiring detail and jumps across columns on a multi-column probe.
+    d = np.hypot(pos[:, 0] - pos[pk, 0], pos[:, 1] - pos[pk, 1])
+    chans = np.argsort(d, kind="stable")[:n_channels]
+    return chans, ks.templates_unwhitened[unit_id][:, chans] * (ks.uv_per_bit or 1.0)
+
+
 def templates_grid(ks, unit_ids=None, n_channels: int = 32, n_cols: int = 6,
                    title: str | None = None, scale_uv: float | None = None,
                    reasons: dict | None = None):
@@ -214,7 +233,6 @@ def templates_grid(ks, unit_ids=None, n_channels: int = 32, n_cols: int = 6,
     unw = ks.templates_unwhitened
     peak = ks.peak_channel
     pos = np.asarray(ks.channel_positions, dtype=float)
-    scale = ks.uv_per_bit or 1.0
     n_rows = int(np.ceil(len(unit_ids) / n_cols))
     t_ms = np.arange(unw.shape[1]) / ks.fs * 1000.0
     span_ms = float(t_ms[-1] - t_ms[0]) or 1.0
@@ -233,11 +251,7 @@ def templates_grid(ks, unit_ids=None, n_channels: int = 32, n_cols: int = 6,
             ax.axis("off")
             continue
         pk = int(peak[uid])
-        # Nearest sites by physical distance, not by index: index order is a
-        # wiring detail and jumps across columns on a multi-column probe.
-        d = np.hypot(pos[:, 0] - pos[pk, 0], pos[:, 1] - pos[pk, 1])
-        chans = np.argsort(d, kind="stable")[:n_channels]
-        wave = unw[uid][:, chans] * scale
+        chans, wave = template_sites(ks, uid, n_channels)
         biggest = scale_uv or (float(np.abs(wave).max()) or 1.0)
         y_scale = 3.0 * dy / biggest                  # micrometres per microvolt
         for j, c in enumerate(chans):

@@ -377,7 +377,35 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             if r is not None:
                 r.close()
 
+    write_page(result, ks, duration_s=duration)
     return result
+
+
+def write_page(result: ReportResult, ks: KilosortResults, *,
+               duration_s: float | None = None, title: str | None = None,
+               kept_reasons: bool = False) -> None:
+    """Write the shank's ``index.html`` (``pages.write_shank_page``) over
+    whatever figures are in ``result.out_dir``, recording it in ``result``.
+    ``kept_reasons``: give the reasons an earlier report kept beside the
+    figures, for a page written again without drawing. Never raises: a page
+    is not worth the figures."""
+    from .pages import PAGE_NAME, write_shank_page
+
+    try:
+        try:
+            # The units the static grid shows, left out of the page's first
+            # random redraws. The picks are seeded, so these are the same.
+            from .plots.units import diverse_template_units
+            shown = ([u for u, _ in diverse_template_units(ks, duration_s)]
+                     if ks.uv_per_bit else _biggest_units(ks, 12))
+        except Exception:  # noqa: BLE001 - only the first redraw differs
+            shown = []
+        path = write_shank_page(result.out_dir, title=title or ks.title("QC figures"),
+                                ks=ks, exclude_units=shown,
+                                skipped=None if kept_reasons else result.skipped)
+        result.made[PAGE_NAME] = str(path)
+    except Exception as exc:  # noqa: BLE001 - recorded, never raised
+        result.skipped[PAGE_NAME] = f"{type(exc).__name__}: {exc}"
 
 
 def _wall_heatmap(rec, sorting_dir: Path, artifact_z_um: float | None):
@@ -473,7 +501,8 @@ def _biggest_units(ks: KilosortResults, n: int) -> list[int]:
 
 def build_session_report(session_dir: str | Path, out_dir: str | Path,
                          noise: bool = True) -> ReportResult:
-    """Make the figures that describe a whole session rather than one shank.
+    """Make the figures that describe a whole session rather than one shank,
+    and its ``index.html`` (:func:`write_session_page`).
 
     ``session_dir`` is the numbered session folder, or its ``sorting``
     directory. Every shank under it is read; unusable ones are named on the
@@ -493,14 +522,50 @@ def build_session_report(session_dir: str | Path, out_dir: str | Path,
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     result = ReportResult(out_dir=out_dir)
-
     found = sessionplots.find_session_shanks(session_dir)
+    try:
+        _session_figures(result, session_dir, found, noise)
+    finally:
+        # No page for a session with nothing sorted: it would link nothing.
+        if found.shanks:
+            write_session_page(result, session_dir,
+                               [s.directory.name for s in found.shanks])
+    return result
+
+
+def write_session_page(result: ReportResult, session_dir: str | Path,
+                       shank_folders=(), kept_reasons: bool = False) -> None:
+    """Write the session's ``index.html`` over the figures in
+    ``result.out_dir``, linking each shank's page. ``kept_reasons`` as for
+    :func:`write_page`. Never raises."""
+    from .pages import PAGE_NAME
+    from .pages import write_session_page as write
+
+    session_dir = Path(session_dir)
+    if session_dir.name == "sorting":
+        session_dir = session_dir.parent
+    label = " ".join(p for p in (session_dir.parent.parent.name,
+                                 session_dir.parent.name, session_dir.name) if p)
+    try:
+        path = write(result.out_dir, title=f"{label} - QC figures",
+                     shank_folders=shank_folders,
+                     skipped=None if kept_reasons else result.skipped)
+        result.made[PAGE_NAME] = str(path)
+    except Exception as exc:  # noqa: BLE001 - recorded, never raised
+        result.skipped[PAGE_NAME] = f"{type(exc).__name__}: {exc}"
+
+
+def _session_figures(result: ReportResult, session_dir: Path, found,
+                     noise: bool) -> None:
+    from .plots import session as sessionplots
+
+    out_dir = result.out_dir
     if not found.shanks:
         reason = "; ".join(found.incomplete) or "no sorted shanks found"
         result.skipped["session_raster_all_units"] = reason
         result.skipped["session_raster_passing"] = reason
         result.skipped["session_rms_across_shanks"] = reason
-        return result
+        return
 
     label = f"{session_dir.parent.parent.name} {session_dir.parent.name}".strip()
     # Named on the figure, not only in a log beside it.
@@ -528,7 +593,7 @@ def build_session_report(session_dir: str | Path, out_dir: str | Path,
         result.skipped["session_rms_across_shanks"] = "not requested"
         for name in NOISE_FIGURES:
             result.skipped[name] = "not requested"
-        return result
+        return
 
     _noise_detail(result, found, label, caveat)
 
@@ -542,7 +607,7 @@ def build_session_report(session_dir: str | Path, out_dir: str | Path,
         result.skipped["session_rms_across_shanks"] = (
             "; ".join(f"{k}: {v}" for k, v in failures.items())
             or "no shank yielded a measurement")
-        return result
+        return
 
     missing = f"   No measurement: {', '.join(failures)}" if failures else ""
     _attempt(result, "session_rms_across_shanks",
@@ -556,7 +621,6 @@ def build_session_report(session_dir: str | Path, out_dir: str | Path,
                            f"{missing}{caveat}")))
     result.made["session_rms_per_shank.csv"] = sessionplots.noise_table(
         measured, out_dir / "session_rms_per_shank.csv")
-    return result
 
 
 #: The noise figures ported from the quad-base noise testing (plots/noise.py).

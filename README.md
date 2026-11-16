@@ -96,6 +96,22 @@ Needing the archived recording:
 | `band_rms` | Activity over time and depth |
 | `depth_power` | Laminar structure in the power spectrum |
 
+### The pages (2.5)
+
+`qm report` and `build_report` also write `index.html` beside the figures: every
+figure in reading order, grouped, each with one line on what it shows, then the
+figures that were not drawn and why. `build_session_report` writes one beside
+the session figures, linking each shank's page by probe and shank. They are plain
+files with relative links, so they open straight from the lab share.
+
+The shank page carries the templates of every unit (about 1.5 MB for 500
+units), so the controls beside `templates_grid` redraw six more QC-passing
+units at random, or units typed by number, in the browser. That is as far as
+interactivity goes in a file opened from a share: a control can only show what
+is already in the page. Anything needing the raw recording needs a server.
+`qualitymetrics.pages.write_shank_page` and `write_session_page` rewrite a page
+over an existing folder without drawing anything.
+
 `wall_heatmap` draws a second row, "As sorted", when the sort folder holds
 SortingManager's `destriped_windows.npz`: the same samples as Kilosort received
 them (destriped, light artifacts removed where the sort did that, before motion

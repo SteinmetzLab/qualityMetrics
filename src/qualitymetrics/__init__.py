@@ -21,7 +21,7 @@ from .metrics import (
 )
 from .raw import Geometry, RawError, RawRecording, find_band, parse_meta
 
-__version__ = "2.4.2"
+__version__ = "2.5.0"
 
 #: What this version can do that a caller may need to know before relying on
 #: it, checked by name, since a machine can lag behind main:
@@ -39,7 +39,11 @@ __version__ = "2.4.2"
 #: ``"shank_map_geometry"``: site positions from ``~snsShankMap`` where a meta
 #: has no ``~snsGeomMap`` (SpikeGLX 20201024), for the Neuropixels 2.0 parts
 #: or a meta stating its pitch.
-FEATURES = frozenset({"ks_channel_map", "uv_per_bit_override", "shank_map_geometry"})
+#:
+#: ``"html_pages"``: ``build_report`` and ``build_session_report`` write an
+#: ``index.html`` over their figures (``qualitymetrics.pages``).
+FEATURES = frozenset({"ks_channel_map", "uv_per_bit_override", "shank_map_geometry",
+                      "html_pages"})
 
 __all__ = [
     "FEATURES", "Geometry", "KilosortResults", "KsError", "RawError", "RawRecording",
