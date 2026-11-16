@@ -243,3 +243,19 @@ def test_report_includes_continuity_without_raw_and_survives_its_failure(sorter_
     result = report.build_report(sorter_output, tmp_path/'qc2', write_phy=False)
     assert 'failed continuity diagnostic' in result.skipped['tracking_continuity']
     assert 'raw_traces' in result.skipped
+
+
+def test_the_staging_folder_is_an_ordinary_folder_and_is_removed(tmp_path, monkeypatch):
+    """tempfile's 0700 folder had no permissions at all on the lab share, and
+    the map failed (sm redo-qc, 2026-11-15): staging must not go through it."""
+    import tempfile
+
+    def refuse(*a, **k):
+        raise AssertionError("staged through tempfile")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", refuse)
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", refuse)
+    root, _sorter = _sort(tmp_path)
+    out = tmp_path / 'qc'
+    assert tp.write(root, out)['n_units'] == 1
+    assert not list(out.glob('.tracking-*'))

@@ -10,7 +10,8 @@ from __future__ import annotations
 import ast
 import csv
 import json
-import tempfile
+import shutil
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -206,11 +207,18 @@ def write(sort_dir: Path, out_dir: Path, *, label="", duration_s=None) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     error_path = out_dir / "tracking_continuity_error.json"
     try:
-        with tempfile.TemporaryDirectory(prefix=".tracking-", dir=out_dir) as temp:
-            stage = Path(temp)
+        # A plain mkdir, not tempfile's: tempfile asks for mode 0700, and on
+        # the lab share (ZFS ACLs over SMB) that made a folder with no
+        # permissions at all, so writing the figure into it failed and the
+        # map was lost (sm redo-qc straight to the share, 2026-11-15).
+        stage = out_dir / f".tracking-{uuid.uuid4().hex[:8]}"
+        stage.mkdir()
+        try:
             report = _write(sort_dir, stage, label=label, duration_s=duration_s)
             for name in FILES:
                 (stage / name).replace(out_dir / name)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
         error_path.unlink(missing_ok=True)
         return report
     except Exception as exc:

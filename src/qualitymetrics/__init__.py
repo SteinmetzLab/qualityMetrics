@@ -21,7 +21,7 @@ from .metrics import (
 )
 from .raw import Geometry, RawError, RawRecording, find_band, parse_meta
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
 #: What this version can do that a caller may need to know before relying on
 #: it, checked by name, since a machine can lag behind main:
