@@ -96,10 +96,98 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
     return fig
 
 
+#: A site counts toward a unit's footprint when its template is larger than
+#: this, peak to peak (Nick, 2026-11-15).
+FOOTPRINT_UV = 30.0
+#: The template grid's picks, two of each, in the order drawn (Nick,
+#: 2026-11-15), then RANDOM_PICKS more at random.
+DIVERSE_PICKS = (
+    ("Highest rate", "rate", True),
+    ("Largest amplitude", "amplitude", True),
+    ("Largest footprint", "footprint", True),
+    ("Smallest footprint", "footprint", False),
+    ("Broadest", "width", True),
+    ("Narrowest", "width", False),
+)
+PICKS_EACH = 2
+RANDOM_PICKS = 6
+
+
+def template_footprints(ks, threshold_uv: float = FOOTPRINT_UV) -> dict[int, int]:
+    """Number of sites on which each unit's template exceeds ``threshold_uv``
+    peak to peak. Needs microvolts per bit."""
+    if not ks.uv_per_bit:
+        raise ValueError("footprints in microvolts need uv_per_bit")
+    unw = ks.templates_unwhitened
+    out = {}
+    for uid in ks.unit_ids:
+        uid = int(uid)
+        if uid < len(unw):
+            ptp = np.ptp(unw[uid], axis=0) * ks.uv_per_bit
+            out[uid] = int((ptp > threshold_uv).sum())
+    return out
+
+
+def diverse_template_units(ks, duration_s: float | None = None,
+                           seed: int = 0) -> list[tuple[int, str]]:
+    """``(unit, why)`` for the template grid: two units at each extreme of
+    :data:`DIVERSE_PICKS`, then :data:`RANDOM_PICKS` others at random.
+
+    From the units that passed QC, where any did: among every unit, the
+    smallest footprints and narrowest waveforms are mostly noise. No unit is
+    picked twice; one already taken goes to the next in line. Ties go to the
+    unit with more spikes. The random picks are seeded, so a redraw shows
+    the same units.
+    """
+    have_template = {int(u) for u in ks.unit_ids if int(u) < len(ks.templates_unwhitened)}
+    passing = {int(u) for u, ok in ks.qc_pass.items() if ok} & have_template
+    pool = sorted(passing or have_template)
+    if not pool:
+        raise ValueError("no units with templates")
+    counts = ks.n_spikes
+    rate = ks.firing_rate(duration_s)
+    measures = {
+        "rate": {u: rate.get(u, np.nan) for u in pool},
+        "amplitude": {u: ks.unit_amplitude_uv.get(u, np.nan) for u in pool},
+        "footprint": template_footprints(ks),
+        "width": ks.trough_to_peak_ms,
+    }
+    chosen: list[tuple[int, str]] = []
+    taken: set[int] = set()
+    for why, key, largest in DIVERSE_PICKS:
+        values = measures[key]
+        ranked = [u for u in pool if u not in taken
+                  and np.isfinite(values.get(u, np.nan))]
+        # Largest or smallest first; ties to the unit with more spikes.
+        ranked.sort(key=lambda u: ((-values[u] if largest else values[u]),
+                                   -counts.get(u, 0), u))
+        for u in ranked[:PICKS_EACH]:
+            chosen.append((u, f"{why}: {_value_text(key, values[u])}"))
+            taken.add(u)
+    rest = [u for u in pool if u not in taken]
+    rng = np.random.default_rng(seed)
+    for u in sorted(rng.choice(rest, size=min(RANDOM_PICKS, len(rest)),
+                               replace=False).tolist()) if rest else []:
+        chosen.append((int(u), "Random"))
+    return chosen
+
+
+def _value_text(key: str, value: float) -> str:
+    return {"rate": f"{value:.1f} spikes/s",
+            "amplitude": f"{value:.0f} µV",
+            "footprint": (f"{value:.0f} site{'' if value == 1 else 's'} over "
+                          f"{FOOTPRINT_UV:.0f} µV"),
+            "width": f"{value:.2f} ms trough to peak"}[key]
+
+
 def templates_grid(ks, unit_ids=None, n_channels: int = 32, n_cols: int = 6,
-                   title: str | None = None, scale_uv: float | None = None):
+                   title: str | None = None, scale_uv: float | None = None,
+                   reasons: dict | None = None):
     """A small multiple per unit: the template on its nearest sites, each
     waveform drawn where its site sits on the probe.
+
+    ``reasons`` maps a unit to why it is shown (:func:`diverse_template_units`),
+    written above its panel.
 
     The ``n_channels`` sites nearest the peak site by physical distance (32 is
     sixteen rows of two columns on NP2, 240 um of shank), each waveform at its
@@ -163,9 +251,11 @@ def templates_grid(ks, unit_ids=None, n_channels: int = 32, n_cols: int = 6,
         # grid is still worth drawing, in arbitrary units.
         if ks.uv_per_bit:
             amp = ks.unit_amplitude_uv.get(int(uid), float("nan"))
-            ax.set_title(f"Unit {uid}, {amp:.0f} µV", fontsize=8)
+            name = f"Unit {uid}, {amp:.0f} µV"
         else:
-            ax.set_title(f"Unit {uid}", fontsize=8)
+            name = f"Unit {uid}"
+        why = (reasons or {}).get(int(uid))
+        ax.set_title(f"{why}\n{name}" if why else name, fontsize=8)
         ax.set_xticks([])
         ax.tick_params(labelsize=6)
         ax.spines["bottom"].set_visible(False)
@@ -187,10 +277,11 @@ def templates_grid(ks, unit_ids=None, n_channels: int = 32, n_cols: int = 6,
 
     scaling = (f"{scale_uv:g} µV per three rows" if scale_uv
                else "each scaled to its own peak, peak site in red")
+    which = (f"{len(unit_ids)} units chosen for variety" if reasons
+             else f"{len(unit_ids)} units")
     fig.suptitle(title or ks.title(
-        f"Templates of the {len(unit_ids)} units with the most spikes, "
-        f"{n_channels} nearest sites at their positions ({scaling})"),
-        fontsize=11)
+        f"Templates of {which}, {n_channels} nearest sites at their "
+        f"positions ({scaling})"), fontsize=11)
     fig.tight_layout()
     return fig
 

@@ -264,8 +264,8 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             _attempt(result, "depth_correlation",
                      lambda: plots.depth_correlation(ks, duration_s=duration))
 
-        _attempt(result, "templates_grid", lambda: plots.templates_grid(
-            ks, unit_ids=_biggest_units(ks, example_units)))
+        _attempt(result, "templates_grid", lambda: _templates_grid(
+            ks, duration, example_units))
         if scale is not None:
             _attempt(result, "noise_cutoff_diagnostic",
                      lambda: plots.noise_cutoff_diagnostic(ks))
@@ -404,6 +404,31 @@ def _wall_heatmap(rec, sorting_dir: Path, artifact_z_um: float | None):
                      f"({type(exc).__name__}: {exc}).")
     return plots.wall_heatmap(rec, artifact_z_um=artifact_z_um, cleaned=cleaned,
                               light_events=light, note="  ".join(notes) or None)
+
+
+def _templates_grid(ks: KilosortResults, duration_s: float | None, fallback_n: int):
+    """Templates chosen for variety (plots.units.diverse_template_units): two
+    of each extreme, then six at random (Nick, 2026-11-15). Footprints need
+    microvolts; without them, the units with the most spikes, as before."""
+    from .plots.units import PICKS_EACH, RANDOM_PICKS, diverse_template_units
+
+    if not ks.uv_per_bit:
+        return plots.templates_grid(ks, unit_ids=_biggest_units(ks, fallback_n),
+                                    title=ks.title(
+                                        f"Templates of the {fallback_n} units with "
+                                        f"the most spikes (microvolts unknown)"))
+    picks = diverse_template_units(ks, duration_s)
+    with_template = {int(u) for u in ks.unit_ids
+                     if int(u) < len(ks.templates_unwhitened)}
+    passing = {int(u) for u, ok in ks.qc_pass.items() if ok} & with_template
+    pool = (f"the {len(passing)} units passing QC" if passing
+            else f"all {len(with_template)} units (none passed QC)")
+    return plots.templates_grid(
+        ks, unit_ids=[u for u, _ in picks], reasons=dict(picks),
+        title=ks.title(f"Templates from {pool}: {PICKS_EACH} at each extreme, "
+                       f"then {RANDOM_PICKS} at random; 32 nearest sites at "
+                       f"their positions, each scaled to its own peak, peak "
+                       f"site in red"))
 
 
 def _filter_state(rec, ks: KilosortResults, sorting_dir: Path):

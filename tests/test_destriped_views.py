@@ -259,3 +259,49 @@ def _minimal_sorter_output(tmp_path, n):
     (out / "params.py").write_text(f"n_channels_dat = {n}\nsample_rate = 30000.0\n"
                                    "dtype = 'int16'\n", encoding="utf-8")
     return out
+
+
+# ------------------------------------------------- templates chosen for variety
+
+def test_template_picks_are_each_extreme_by_a_direct_ranking_without_repeats():
+    """Two per extreme in order, from QC-passing units, a unit taken once
+    goes to the next in line, then random others; checked against a
+    brute-force ranking of planted measures."""
+    from types import SimpleNamespace
+
+    from qualitymetrics.plots import units as U
+
+    n = 40
+    rng = np.random.default_rng(5)
+    templates = np.zeros((n, 61, 8), dtype=np.float32)
+    footprint = rng.integers(1, 8, n)
+    for u in range(n):
+        templates[u, 20, :footprint[u]] = -100.0     # ptp 100 uV on that many sites
+    rate = dict(enumerate(rng.uniform(0.1, 40, n)))
+    amp = dict(enumerate(rng.uniform(50, 900, n)))
+    width = dict(enumerate(rng.uniform(0.1, 1.3, n)))
+    passing = {u: (u % 4 != 0) for u in range(n)}    # a quarter fail
+    ks = SimpleNamespace(
+        unit_ids=np.arange(n), templates_unwhitened=templates, uv_per_bit=1.0,
+        qc_pass=passing, n_spikes={u: 100 + u for u in range(n)},
+        firing_rate=lambda d=None: rate, unit_amplitude_uv=amp,
+        trough_to_peak_ms=width)
+    picks = U.diverse_template_units(ks, 10.0)
+    units = [u for u, _ in picks]
+    assert len(units) == len(set(units)) == 6 * U.PICKS_EACH + U.RANDOM_PICKS
+    assert all(passing[u] for u in units)
+
+    # The reference: rank the passing units directly, skipping those taken.
+    pool = [u for u in range(n) if passing[u]]
+    measure = {"rate": rate, "amplitude": amp, "width": width,
+               "footprint": dict(enumerate(footprint.astype(float)))}
+    taken, expected = set(), []
+    for _why, key, largest in U.DIVERSE_PICKS:
+        ranked = sorted((u for u in pool if u not in taken),
+                        key=lambda u: ((-1 if largest else 1) * measure[key][u],
+                                       -(100 + u), u))
+        expected += ranked[:U.PICKS_EACH]
+        taken.update(ranked[:U.PICKS_EACH])
+    assert units[:len(expected)] == expected
+    # Seeded: the same units on a redraw.
+    assert U.diverse_template_units(ks, 10.0) == picks
