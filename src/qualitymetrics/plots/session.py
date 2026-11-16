@@ -183,6 +183,10 @@ class SessionShank:
     slot: int | None = None
     #: True if the session has several runs. Labels then include the run.
     several_runs: bool = False
+    #: The AP file's meta, when the caller already knows it (the per-shank
+    #: report, whose recording can be on a worker's scratch, not in the
+    #: session's raw_ephys_data). None: found from the session layout.
+    meta_path: Path | None = None
 
     @property
     def label(self) -> str:
@@ -396,8 +400,11 @@ def _shank_meta(shank) -> dict | None:
     from ..raw import parse_meta
 
     try:
-        cbin, _ch = _ap_paths(shank)
-        meta_path = cbin.with_suffix(".meta")
+        meta_path = getattr(shank, "meta_path", None)
+        if meta_path is None:
+            cbin, _ch = _ap_paths(shank)
+            meta_path = cbin.with_suffix(".meta")
+        meta_path = Path(meta_path)
         return parse_meta(meta_path) if meta_path.exists() else None
     except Exception:  # noqa: BLE001 - the layout is then assumed, as before
         return None

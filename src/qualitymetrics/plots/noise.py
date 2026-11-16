@@ -364,6 +364,43 @@ def measure_shank(shank, *, reader_factory=None) -> dict:
     }
 
 
+class _OpenRecording:
+    """An open RawRecording's stored samples as measure_shank reads a reader:
+    ``shape`` and row slicing of every stored column. Has no ``close``, so
+    measure_shank leaves the recording open: the report that opened it
+    closes it."""
+
+    def __init__(self, rec):
+        self._source = rec._reader if rec._reader is not None else rec._memmap
+        self.shape = (int(rec.n_samples), int(rec.n_channels))
+
+    def __getitem__(self, rows):
+        return self._source[rows]
+
+
+def shank_measurement(rec, ks, sorting_dir, *, probe: int = 0,
+                      shank: int = 0) -> dict:
+    """:func:`measure_shank` for one sorted shank whose recording is already
+    open, for the per-shank report's ``filter_state``: the same five stages
+    and the same seconds as the session's noise figures.
+
+    ``ks`` must carry the recording's microvolts per bit. The layout (which
+    stored columns carry voltage, each one's acquired channel) is read from
+    the recording's own meta, beside ``rec.path``.
+    """
+    from pathlib import Path
+
+    from .session import SessionShank
+
+    if not ks.uv_per_bit:
+        raise ValueError("microvolts per bit are unknown")
+    target = SessionShank(probe=int(probe), shank=int(shank),
+                          directory=Path(sorting_dir), ks=ks,
+                          duration_s=float(rec.duration_s),
+                          meta_path=Path(rec.path).with_suffix(".meta"))
+    return measure_shank(target, reader_factory=lambda _s: _OpenRecording(rec))
+
+
 # ------------------------------------------------------------------ figures
 def by_depth(values: np.ndarray, depth: np.ndarray, *, axis: int = 0):
     """Average the channels at each depth, for display; returns (depths, values).
@@ -542,9 +579,13 @@ def rms_by_channel(measured: list[dict], *, title="", subtitle=""):
     return fig
 
 
-def median_spectra(measured: list[dict], *, title="", subtitle=""):
-    """One panel per shank: the median spectrum across channels, per stage."""
-    fig, axes, where = _per_shank_axes(measured, panel_w=2.3, panel_h=2.1,
+def median_spectra(measured: list[dict], *, title="", subtitle="",
+                   panel_w: float = 2.3, panel_h: float = 2.1):
+    """One panel per shank: the median spectrum across channels, per stage.
+
+    Also the per-shank report's ``filter_state``, one shank at a larger size
+    (:func:`shank_measurement`)."""
+    fig, axes, where = _per_shank_axes(measured, panel_w=panel_w, panel_h=panel_h,
                                        sharey=True)
     for m in measured:
         ax = where[(m["probe"], m["shank"])]

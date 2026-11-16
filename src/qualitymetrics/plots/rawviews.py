@@ -387,61 +387,114 @@ def wall_heatmap(rec, t_starts_s=None, win_ms: float = 25.0,
     return fig
 
 
+#: Vertical room per trace in raw_traces with every channel, in inches: 384
+#: channels make a figure about 40 inches tall, read on a screen, not paper.
+TRACE_HEIGHT_IN = 0.1
+
+
 def raw_traces(rec, t_start_s: float = 100.0, win_ms: float = 100.0,
-               channels=None, n_channels: int = 40,
+               channels=None, n_channels: int | None = None,
                highpass_hz: float | None = 300.0, cmr: bool = True,
                spacing_uv: float | None = None, title: str | None = None,
-               figsize=(13, 9)):
-    """Stacked traces for a slice of the shank, with a real microvolt scale bar.
+               figsize=None, cleaned=None):
+    """Stacked traces of every channel, shallow at the bottom, with a real
+    microvolt scale bar.
 
-    Channels are evenly spread over the shank by default rather than taken from
-    one end, so the figure describes the whole probe.
+    With ``cleaned`` (the sort's kept windows,
+    :class:`~qualitymetrics.pipelinefiles.DestripedWindows`), the traces are
+    the pipeline's destripe, what Kilosort is given before motion
+    interpolation: the middle kept second, ``win_ms`` from its center, every
+    channel the sort kept, at its recording channel's depth. Without, the
+    archive high-passed and median-referenced here, from ``t_start_s``.
+
+    Every channel by default, because a subset of 40 missed exactly what this
+    figure is for: a bad channel or a stripe between the ones drawn.
+    ``n_channels`` spreads that many evenly over the shank instead.
     """
     import matplotlib.pyplot as plt
     use_lab_style()
 
-    order, depths = _depth_order(rec)
-    if channels is None:
-        pick = np.linspace(0, len(order) - 1, min(n_channels, len(order)))
-        pick = np.unique(pick.astype(int))
-        channels = order[pick]
-        chan_depths = depths[pick]
+    geom = rec.geometry
+    source = None
+    if cleaned is not None:
+        if cleaned.channels is None:
+            raise ValueError("the kept windows name their channels another way "
+                             "(a probe-wide sort), so their depths are not "
+                             "known here")
+        middle = cleaned.n_windows // 2
+        core0, core1 = cleaned.core(middle)
+        width = int(round(win_ms / 1000.0 * rec.fs))
+        i0 = core0 + max(0, (core1 - core0 - width) // 2)
+        block = cleaned.samples_uv(i0, min(i0 + width, core1))
+        columns = np.asarray(cleaned.channels, dtype=int)
+        col_depths = (geom.y[columns] if geom is not None
+                      else columns.astype(float))
+        col_x = geom.x[columns] if geom is not None else np.zeros(columns.size)
+        keep = np.lexsort((col_x, col_depths))       # shallow first, then across
+        if n_channels:
+            keep = keep[np.unique(np.linspace(0, keep.size - 1,
+                                              min(n_channels, keep.size)).astype(int))]
+        traces = block[:, keep]
+        chan_depths = col_depths[keep]
+        t_start_s = i0 / rec.fs
+        source = "pipeline destripe (Kilosort's input before motion interpolation)"
     else:
-        channels = np.asarray(channels, dtype=int)
-        geom = rec.geometry
-        chan_depths = (geom.y[channels] if geom is not None
-                       else channels.astype(float))
+        order, depths = _depth_order(rec)
+        if channels is None:
+            pick = np.arange(len(order))
+            if n_channels:
+                pick = np.unique(np.linspace(0, len(order) - 1,
+                                             min(n_channels, len(order))).astype(int))
+            channels = order[pick]
+            chan_depths = depths[pick]
+        else:
+            channels = np.asarray(channels, dtype=int)
+            chan_depths = (geom.y[channels] if geom is not None
+                           else channels.astype(float))
+        traces = _filtered_window(rec, t_start_s, win_ms, highpass_hz, cmr,
+                                  channels)
 
-    traces = _filtered_window(rec, t_start_s, win_ms, highpass_hz, cmr,
-                              channels)
-
+    n_traces = traces.shape[1]
     if spacing_uv is None:
-        spacing_uv = float(np.percentile(np.abs(traces), 99.5)) * 2.5 or 50.0
+        # Room for the noise of every trace, not its biggest spike: with a
+        # hundred traces or more, a spike overlapping its neighbors is fine and
+        # a spacing set by the largest spike flattens everything else.
+        rms = np.sqrt(np.median(np.mean(traces.astype(np.float64) ** 2, axis=0)))
+        spacing_uv = float(6.0 * rms) or 50.0
     t_ms = np.arange(traces.shape[0]) / rec.fs * 1000.0
+    win_ms = float(t_ms[-1]) if t_ms.size else win_ms
 
+    if figsize is None:
+        figsize = (13, max(9.0, 1.5 + TRACE_HEIGHT_IN * n_traces))
     fig, ax = plt.subplots(figsize=figsize)
-    for j in range(traces.shape[1]):
-        ax.plot(t_ms, traces[:, j] + j * spacing_uv, lw=0.5, color="0.15")
+    for j in range(n_traces):
+        ax.plot(t_ms, traces[:, j] + j * spacing_uv, lw=0.4, color="0.15")
 
-    ax.set_yticks(np.arange(traces.shape[1]) * spacing_uv)
-    ax.set_yticklabels([f"{d:.0f}" for d in chan_depths], fontsize=7)
+    # A label on every trace is unreadable past a few dozen; about one per 40.
+    step = max(1, int(np.ceil(n_traces / 40)))
+    ticks = np.arange(0, n_traces, step)
+    ax.set_yticks(ticks * spacing_uv)
+    ax.set_yticklabels([f"{chan_depths[j]:.0f}" for j in ticks], fontsize=7)
+    ax.set_ylim(-1.5 * spacing_uv, n_traces * spacing_uv + 0.5 * spacing_uv)
     ax.set_ylabel(DEPTH_LABEL)
     ax.set_xlabel("Time from window start (ms)")
     ax.set_xlim(0, win_ms)
     despine(ax)
 
     # Scale bar, because a stacked-trace plot has no usable voltage axis.
-    bar = _nice_round(spacing_uv / 2.5)
+    bar = _nice_round(spacing_uv)
     ax.plot([win_ms * 0.99] * 2, [0, bar], lw=3, color="crimson",
             solid_capstyle="butt", clip_on=False)
     ax.text(win_ms * 0.985, bar / 2, f"{bar:.0f} µV ", ha="right", va="center",
             color="crimson", fontsize=9)
 
-    band = f"high-passed at {highpass_hz:.0f} Hz" if highpass_hz else "wideband"
-    ref = ", common median referenced" if (highpass_hz and cmr) else ""
-    ax.set_title(title or f"{rec.path.name}: {traces.shape[1]} channels, "
-                          f"{win_ms:.0f} ms from {t_start_s:.0f} s "
-                          f"({band}{ref})")
+    if source is None:
+        band = f"high-passed at {highpass_hz:.0f} Hz" if highpass_hz else "wideband"
+        ref = ", common median referenced" if (highpass_hz and cmr) else ""
+        source = f"archive {band}{ref}"
+    which = (f"{n_traces} channels" if n_channels else f"all {n_traces} channels")
+    ax.set_title(title or f"{rec.path.name}: {which}, {win_ms:.0f} ms from "
+                          f"{t_start_s:.1f} s, {source}")
     fig.tight_layout()
     return fig
 

@@ -40,8 +40,6 @@ def depth_power_wide(rec, t_start_s: float = 100.0, win_s: float = 4.0,
     every frequency on it.
     """
     import matplotlib.pyplot as plt
-    from matplotlib.colors import Normalize
-    from scipy.signal import welch
     use_lab_style()
 
     geom = rec.geometry
@@ -49,12 +47,42 @@ def depth_power_wide(rec, t_start_s: float = 100.0, win_s: float = 4.0,
     depths = geom.y[:n] if geom is not None else np.arange(n, dtype=float)
 
     block = rec.get_traces(t_start_s, t_start_s + win_s)
-    freqs, pxx = welch(block, fs=rec.fs,
-                       nperseg=min(int(rec.fs), block.shape[0]), axis=0)
+    freqs, f_edges, edges, shown, label = _wide_power_image(
+        [block], rec.fs, depths, depth_bin_um, fmin_hz, normalize)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    finite = shown[np.isfinite(shown)]
+    vmin, vmax = np.percentile(finite, [2, 98]) if finite.size else (0.0, 1.0)
+    mesh = _draw_wide_power(ax, freqs, f_edges, edges, shown, vmin, vmax)
+    cbar = fig.colorbar(mesh, ax=ax, pad=0.02)
+    cbar.set_label(label)
+    ax.set_title(title or f"{rec.path.name}: power against depth to "
+                          f"{freqs[-1] / 1000:.0f} kHz, as stored "
+                          f"({win_s:.0f} s from {t_start_s:.0f} s)")
+    fig.tight_layout()
+    return fig
+
+
+def _wide_power_image(blocks, fs: float, depths, depth_bin_um: float,
+                      fmin_hz: float, normalize: str | None = None):
+    """Welch power of each (samples, channels) block, averaged over blocks,
+    then over the channels in each depth bin. Returns ``(freqs, freq edges,
+    depth edges, image in dB (depth, freq), colorbar label)``."""
+    from scipy.signal import welch
+
+    depths = np.asarray(depths, dtype=float)
+    psd = []
+    for block in blocks:
+        freqs, pxx = welch(block, fs=fs, nperseg=min(int(fs), block.shape[0]),
+                           axis=0)
+        psd.append(pxx)
+    pxx = np.mean(psd, axis=0)
     keep = freqs >= fmin_hz
     freqs, pxx = freqs[keep], pxx[keep]
 
     edges = np.arange(depths.min(), depths.max() + depth_bin_um, depth_bin_um)
+    if edges.size < 2:
+        edges = np.array([depths.min(), depths.min() + depth_bin_um])
     bin_of = np.clip(np.digitize(depths, edges) - 1, 0, len(edges) - 2)
     image = np.array([pxx[:, bin_of == b].mean(axis=1) if np.any(bin_of == b)
                       else np.full(freqs.size, np.nan)
@@ -66,29 +94,79 @@ def depth_power_wide(rec, t_start_s: float = 100.0, win_s: float = 4.0,
     if normalize == "freq":
         shown = shown - np.nanmean(shown, axis=0, keepdims=True)
         label = "Power relative to depth mean (dB)"
-
-    # pcolormesh wants one more edge than value on each axis. Geometric midpoints
-    # are the right interior edges for a log axis.
+    # pcolormesh wants one more edge than value on each axis. Geometric
+    # midpoints are the right interior edges for a log axis.
     f_edges = np.concatenate([[freqs[0]], np.sqrt(freqs[:-1] * freqs[1:]),
                               [freqs[-1]]])
+    return freqs, f_edges, edges, shown, label
 
-    fig, ax = plt.subplots(figsize=figsize)
-    finite = shown[np.isfinite(shown)]
-    vmin, vmax = np.percentile(finite, [2, 98]) if finite.size else (0.0, 1.0)
+
+def _draw_wide_power(ax, freqs, f_edges, edges, shown, vmin, vmax):
+    from matplotlib.colors import Normalize
+
     mesh = ax.pcolormesh(f_edges, edges, np.ma.masked_invalid(shown),
                          cmap="viridis", norm=Normalize(vmin=vmin, vmax=vmax),
                          shading="auto")
     ax.set_xscale("log")
-    cbar = fig.colorbar(mesh, ax=ax, pad=0.02)
-    cbar.set_label(label)
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel(DEPTH_LABEL)
     ax.set_xlim(freqs[0], freqs[-1])
     despine(ax)
-    ax.set_title(title or f"{rec.path.name}: power against depth to "
-                          f"{freqs[-1] / 1000:.0f} kHz "
-                          f"({win_s:.0f} s from {t_start_s:.0f} s)")
-    fig.tight_layout()
+    return mesh
+
+
+def depth_power_wide_destriped(rec, cleaned, depth_bin_um: float = 40.0,
+                               fmin_hz: float = 1.0, title: str | None = None,
+                               figsize=(16, 8)):
+    """depth_power_wide for what the sorting pipeline's destripe left, beside
+    the same seconds and channels as stored.
+
+    ``cleaned`` is the sort's kept windows
+    (:class:`~qualitymetrics.pipelinefiles.DestripedWindows`): three seconds,
+    early, middle and late, of the destripe's output, the signal Kilosort is
+    given before motion interpolation. Both panels average the same three
+    seconds of the same channels, and share one color scale, so the
+    difference between them is what the destripe removed. Below 300 Hz the
+    right panel shows the pipeline's high-pass, not the brain.
+    """
+    import matplotlib.pyplot as plt
+    use_lab_style()
+
+    if cleaned.channels is None:
+        raise ValueError("the kept windows name their channels another way "
+                         "(a probe-wide sort), so their depths are not known here")
+    geom = rec.geometry
+    if geom is None:
+        raise ValueError("the recording has no site geometry")
+    channels = np.asarray(cleaned.channels, dtype=int)
+    depths = geom.y[channels]
+    raw_blocks, kept_blocks = [], []
+    for window in range(cleaned.n_windows):
+        i0, i1 = cleaned.core(window)
+        kept_blocks.append(cleaned.samples_uv(i0, i1))
+        raw_blocks.append(rec.get_traces(i0 / rec.fs, i1 / rec.fs,
+                                         channels=channels))
+    panels = []
+    for blocks in (raw_blocks, kept_blocks):
+        panels.append(_wide_power_image(blocks, rec.fs, depths, depth_bin_um,
+                                        fmin_hz))
+    finite = np.concatenate([p[3][np.isfinite(p[3])] for p in panels])
+    vmin, vmax = np.percentile(finite, [2, 98]) if finite.size else (0.0, 1.0)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
+    names = ("As stored", "After the pipeline's destripe (Kilosort's input)")
+    for ax, (freqs, f_edges, edges, shown, _label), name in zip(axes, panels, names):
+        mesh = _draw_wide_power(ax, freqs, f_edges, edges, shown, vmin, vmax)
+        ax.set_title(name)
+    axes[1].set_ylabel("")
+    cbar = fig.colorbar(mesh, ax=axes, pad=0.02)
+    cbar.set_label(panels[0][4])
+    times = ", ".join(f"{cleaned.core(w)[0] / rec.fs:.0f}"
+                      for w in range(cleaned.n_windows))
+    fig.suptitle(title or f"{rec.path.name}: power against depth before and "
+                          f"after destriping ({cleaned.n_windows} windows of "
+                          f"{cleaned.width / rec.fs:.0f} s, from {times} s; "
+                          f"{channels.size} sorted channels)", fontsize=11)
     return fig
 
 

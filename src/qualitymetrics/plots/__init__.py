@@ -1,9 +1,10 @@
 """Figures. Each returns a matplotlib Figure and draws nothing to screen."""
 from .channels import band_rms, channel_health, depth_power  # noqa: I001
 from .channels import filter_state, plot_channel_health
-from .diagnostics import (depth_power_wide, noise_cutoff_diagnostic,
+from .diagnostics import (depth_power_wide, depth_power_wide_destriped,
+                          noise_cutoff_diagnostic,
                           units_spanning_noise_cutoff)
-from .drift import amplitude_cdf_over_depth, drift_map, unit_drift
+from .drift import amplitude_cdf_over_depth, drift_map, passing_units, unit_drift
 from .examples import draw_acg, draw_template_waterfall, example_neurons
 from .population import (depth_correlation, depth_profiles, firing_rate_image,
                          lfp_band_profiles)
@@ -16,9 +17,9 @@ from .units import templates_grid, unit_summary_table
 __all__ = [
     "amp_depth_scatter", "amplitude_cdf_over_depth", "band_rms",
     "channel_health", "depth_correlation", "depth_power", "depth_power_wide",
-    "depth_profiles", "draw_acg", "draw_template_waterfall",
+    "depth_power_wide_destriped", "depth_profiles", "draw_acg", "draw_template_waterfall",
     "draw_waveforms_on_probe", "drift_map", "example_neurons", "filter_state",
-    "firing_rate_image", "lfp_band_profiles", "noise_cutoff_diagnostic",
+    "firing_rate_image", "lfp_band_profiles", "noise_cutoff_diagnostic", "passing_units",
     "plot_channel_health", "raw_traces", "raw_with_spikes", "sample_waveforms", "saturation_report",
     "sorted_columns", "spike_snippets", "template_waterfall", "templates_grid",
     "unit_drift",

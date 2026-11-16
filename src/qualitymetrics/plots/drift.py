@@ -35,9 +35,44 @@ def _subsample(n: int, limit: int | None, seed: int = 0):
     return np.sort(rng.choice(n, size=limit, replace=False))
 
 
+def _only_units(ks, unit_ids):
+    """Spike mask and unit list for ``unit_ids`` (None: every unit).
+
+    Raises ValueError for an empty selection: an empty scatter titled with
+    the selection would read as a recording with no spikes.
+    """
+    if unit_ids is None:
+        return np.ones(ks.spike_clusters.size, dtype=bool), list(ks.unit_ids)
+    # Only units that have spikes: a label file can name one that does not
+    # (stale labels after a merge), and it has no depth to color by.
+    present = {int(u) for u in ks.unit_ids}
+    wanted = sorted({int(u) for u in unit_ids} & present)
+    if not wanted:
+        raise ValueError("no selected unit has spikes")
+    return np.isin(ks.spike_clusters, wanted), wanted
+
+
+def _selection_words(ks, unit_ids) -> str:
+    """How the title names a selection: '' for every unit."""
+    if unit_ids is None:
+        return ""
+    # "our QC" is quality_metrics.json's verdicts; anything else is named.
+    source = "" if ks.qc_source == "our QC" else f" (by {ks.qc_source})"
+    shown = len({int(u) for u in unit_ids} & {int(u) for u in ks.unit_ids})
+    return (f", only the {shown} of {len(ks.unit_ids)} units "
+            f"passing QC{source}")
+
+
+def passing_units(ks) -> list[int]:
+    """The units that passed quality control, by :attr:`KilosortResults.qc_pass`,
+    and have spikes in this sort."""
+    present = {int(u) for u in ks.unit_ids}
+    return sorted(int(u) for u, ok in ks.qc_pass.items() if ok and int(u) in present)
+
+
 def unit_drift(ks, artifact_z_um: float | None = None,
                max_spikes: int | None = 400_000, title: str | None = None,
-               figsize=(13, 7)):
+               figsize=(13, 7), unit_ids=None):
     """Per-spike depth against time, coloured two ways.
 
     Panel A colours by unit. A depth band that changes colour partway through
@@ -55,22 +90,30 @@ def unit_drift(ks, artifact_z_um: float | None = None,
     which on a 2865 um shank shades nothing and on a shorter one shades
     everything, and it also wrote that number into the annotation text so the
     label disagreed with the line whenever a caller passed something else.
+
+    ``unit_ids`` draws only those units' spikes (the QC-passing version), on
+    the whole recording's time and depth range, so it lies over the
+    every-unit figure.
     """
     import matplotlib.pyplot as plt
     use_lab_style()
 
-    t = ks.spike_times_s
-    z = ks.spike_depths_um
-    clusters = ks.spike_clusters
-    amps = ks.spike_amplitudes_uv()
+    mask, uids = _only_units(ks, unit_ids)
+    t_end = ks.spike_times_s.max()
+    z_all = ks.spike_depths_um
+    z_range = (np.nanmin(z_all), np.nanmax(z_all))
+    t = ks.spike_times_s[mask]
+    z = z_all[mask]
+    clusters = ks.spike_clusters[mask]
+    all_amps = ks.spike_amplitudes_uv()
+    amps = all_amps[mask]
 
     idx = _subsample(t.size, max_spikes)
-    shown = f"{idx.size:,} of {t.size:,} spikes"
+    shown = f"{idx.size:,} of {t.size:,} spikes{_selection_words(ks, unit_ids)}"
 
     fig, axes = plt.subplots(1, 2, figsize=figsize, sharex=True, sharey=True)
 
     # -- Panel A: colour = unit, ordered by depth so the palette walks the shank
-    uids = ks.unit_ids
     order = np.argsort([ks.unit_depth_um[int(u)] for u in uids])
     colors = _golden_angle_colors(len(uids))
     lookup = {int(uids[o]): colors[i] for i, o in enumerate(order)}
@@ -82,7 +125,9 @@ def unit_drift(ks, artifact_z_um: float | None = None,
 
     # -- Panel B: colour = amplitude, log-scaled because the range is wide
     a = amps[idx]
-    vmin, vmax = np.percentile(a, [2, 98])
+    # Limits from every spike, not the selection's, so the QC-passing version
+    # shares its colors with the every-unit one it lies over.
+    vmin, vmax = np.percentile(all_amps, [2, 98])
     sc = axes[1].scatter(t[idx], z[idx], s=1.0, c=a, cmap="viridis",
                          vmin=vmin, vmax=vmax, alpha=0.45, linewidths=0,
                          rasterized=True)
@@ -104,7 +149,9 @@ def unit_drift(ks, artifact_z_um: float | None = None,
                         transform=ax.get_yaxis_transform(), ha="right",
                         va="bottom", fontsize=8, color="0.35")
     axes[0].set_ylabel(DEPTH_LABEL)
-    axes[0].set_xlim(0, t.max())
+    axes[0].set_xlim(0, t_end)
+    pad = 0.02 * (z_range[1] - z_range[0] or 1.0)
+    axes[0].set_ylim(z_range[0] - pad, z_range[1] + pad)
 
     fig.suptitle(title or ks.title(f"Spike depth over time ({shown})"),
                  fontsize=12)
@@ -113,26 +160,36 @@ def unit_drift(ks, artifact_z_um: float | None = None,
 
 
 def drift_map(ks, amp_threshold_uv: float = 0.0, max_spikes: int | None = 600_000,
-              title: str | None = None, figsize=(13, 7)):
+              title: str | None = None, figsize=(13, 7), unit_ids=None):
     """The classic drift map: every spike as a dot, darkness by amplitude.
 
     Equivalent in intent to plotDriftmap in cortex-lab/spikes, with the
     amplitude scale in real microvolts rather than in the sorter's arbitrary
     units, and with a colorbar that says what the shading means.
+
+    ``unit_ids`` draws only those units' spikes (the QC-passing version), on
+    the whole recording's time and depth range.
     """
     import matplotlib.pyplot as plt
     use_lab_style()
 
-    t = ks.spike_times_s
-    z = ks.spike_depths_um
-    amps = ks.spike_amplitudes_uv()
+    mask, _uids = _only_units(ks, unit_ids)
+    z_all = ks.spike_depths_um
+    z_range = (np.nanmin(z_all), np.nanmax(z_all))
+    t = ks.spike_times_s[mask]
+    z = z_all[mask]
+    all_amps = ks.spike_amplitudes_uv()
+    amps = all_amps[mask]
+    # Limits from every spike over the threshold, not the selection's, so the
+    # QC-passing version shares its shading with the every-unit one.
+    limits = np.percentile(all_amps[all_amps >= amp_threshold_uv], [5, 99])
 
     keep = amps >= amp_threshold_uv
     t, z, amps = t[keep], z[keep], amps[keep]
     idx = _subsample(t.size, max_spikes)
 
     fig, ax = plt.subplots(figsize=figsize)
-    vmin, vmax = np.percentile(amps, [5, 99])
+    vmin, vmax = limits
     sc = ax.scatter(t[idx], z[idx], s=1.5, c=amps[idx], cmap="gray_r",
                     vmin=vmin, vmax=vmax, alpha=0.35, linewidths=0,
                     rasterized=True)
@@ -143,11 +200,14 @@ def drift_map(ks, amp_threshold_uv: float = 0.0, max_spikes: int | None = 600_00
     ax.set_xlabel(TIME_LABEL)
     ax.set_ylabel(DEPTH_LABEL)
     ax.set_xlim(0, ks.spike_times_s.max())
+    pad = 0.02 * (z_range[1] - z_range[0] or 1.0)
+    ax.set_ylim(z_range[0] - pad, z_range[1] + pad)
     despine(ax)
     thresh = (f", amplitude ≥ {amp_threshold_uv:.0f} µV"
               if amp_threshold_uv > 0 else "")
     ax.set_title(title or ks.title(
-        f"Drift map ({idx.size:,} spikes{thresh})"))
+        f"Drift map ({idx.size:,} spikes{thresh}"
+        f"{_selection_words(ks, unit_ids)})"))
     fig.tight_layout()
     return fig
 

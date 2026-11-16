@@ -223,6 +223,7 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                       else "no recording meta found, so microvolts are unknown; "
                            "amplitude figures need it")
             for name in ("amp_depth_scatter", "unit_drift", "drift_map",
+                         "unit_drift_qc-passing", "drift_map_qc-passing",
                          "amplitude_cdf_over_depth", "firing_rate_image",
                          "depth_profiles", "depth_correlation",
                          "noise_cutoff_diagnostic"):
@@ -234,6 +235,26 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
             _attempt(result, "unit_drift",
                      lambda: plots.unit_drift(ks, artifact_z_um=artifact_z_um))
             _attempt(result, "drift_map", lambda: plots.drift_map(ks))
+            # The same two with only the units that passed QC, on the same
+            # axes, so they lie over the every-unit versions (Nick, 2026-11-15).
+            # Read inside a guard: a malformed quality_metrics.json must cost
+            # these two figures, not the rest of the report (review, 2026-11-15).
+            try:
+                passing, passing_problem = plots.passing_units(ks), None
+            except Exception as exc:  # noqa: BLE001 - recorded as the reason
+                passing, passing_problem = [], f"{type(exc).__name__}: {exc}"
+            if passing_problem:
+                for name in ("unit_drift_qc-passing", "drift_map_qc-passing"):
+                    result.skipped[name] = f"QC verdicts unreadable: {passing_problem}"
+            elif passing:
+                _attempt(result, "unit_drift_qc-passing",
+                         lambda: plots.unit_drift(ks, artifact_z_um=artifact_z_um,
+                                                  unit_ids=passing))
+                _attempt(result, "drift_map_qc-passing",
+                         lambda: plots.drift_map(ks, unit_ids=passing))
+            else:
+                for name in ("unit_drift_qc-passing", "drift_map_qc-passing"):
+                    result.skipped[name] = f"no unit passed QC by {ks.qc_source}"
             _attempt(result, "amplitude_cdf_over_depth",
                      lambda: plots.amplitude_cdf_over_depth(ks))
             _attempt(result, "firing_rate_image",
@@ -255,9 +276,21 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                       if raw_problem else "no archived recording found for this shank")
             for name in ("wall_heatmap", "raw_traces", "raw_with_spikes",
                          "channel_health", "filter_state", "band_rms",
-                         "example_neurons"):
+                         "example_neurons", "depth_power_wide_destriped"):
                 result.skipped[name] = reason
         else:
+            # The pipeline's own destriped seconds, for the figures that show
+            # what Kilosort was given. A damaged file costs those figures
+            # their destriped half, never the rest of the report.
+            cleaned, cleaned_problem = None, None
+            try:
+                cleaned = load_destriped_windows(sorting_dir)
+                if cleaned is None:
+                    cleaned_problem = (f"no {PIPELINE_FILE} in the sort folder "
+                                       "(re-running the sort's quality metrics "
+                                       "in SortingManager makes it)")
+            except Exception as exc:  # noqa: BLE001 - recorded as the reason
+                cleaned_problem = f"{PIPELINE_FILE} unreadable ({type(exc).__name__}: {exc})"
             # Units and Kilosort channels beside the raw traces: checked once,
             # so a sort and a file that do not fit cost those two figures with
             # the reason, rather than drawing "No snippets" panels.
@@ -268,8 +301,20 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                 pairing = f"{type(exc).__name__}: {exc}"
             _attempt(result, "wall_heatmap", lambda: _wall_heatmap(
                 rec, sorting_dir, artifact_z_um))
+            # Every channel, as the pipeline's destripe left it; the archive,
+            # high-passed and referenced here, only when the sort kept none.
+            # A probe-wide sort names its kept channels AP<n>, whose depths are
+            # not mapped here: its traces come from the archive, as before.
+            traced = cleaned if (cleaned is not None
+                                 and cleaned.channels is not None) else None
             _attempt(result, "raw_traces",
-                     lambda: plots.raw_traces(rec, t_start_s=t_start_s))
+                     lambda: plots.raw_traces(rec, t_start_s=t_start_s,
+                                              cleaned=traced))
+            if cleaned is None:
+                result.skipped["depth_power_wide_destriped"] = cleaned_problem
+            else:
+                _attempt(result, "depth_power_wide_destriped",
+                         lambda: plots.depth_power_wide_destriped(rec, cleaned))
             if pairing:
                 result.skipped["raw_with_spikes"] = pairing
             else:
@@ -277,8 +322,11 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                     rec, ks, t_start_s=t_start_s))
             _attempt(result, "channel_health",
                      lambda: plots.plot_channel_health(rec))
-            _attempt(result, "filter_state",
-                     lambda: plots.filter_state(rec)[0])
+            # The session's noise stages for this shank alone, at the same
+            # seconds (plots.noise.shank_measurement); it replaced a single
+            # raw spectrum (Nick, 2026-11-15).
+            _attempt(result, "filter_state", lambda: _filter_state(
+                rec, ks, sorting_dir))
             _attempt(result, "band_rms",
                      lambda: plots.band_rms(rec, lf_rec=lf_rec))
             if pairing:
@@ -313,6 +361,9 @@ def build_report(sorting_dir: str | Path, out_dir: str | Path,
                 result.skipped["depth_power_wide"] = (
                     f"the archived AP recording was not opened: {raw_problem}"
                     if raw_problem else "no AP recording for this shank")
+        # No destriped depth_power: the pipeline high-passes at 300 Hz first,
+        # and depth_power stops at 300 Hz, so it would show the filter.
+        # depth_power_wide_destriped shows the whole band.
 
         # ---- phy columns
         if write_phy and scale is not None:
@@ -353,6 +404,40 @@ def _wall_heatmap(rec, sorting_dir: Path, artifact_z_um: float | None):
                      f"({type(exc).__name__}: {exc}).")
     return plots.wall_heatmap(rec, artifact_z_um=artifact_z_um, cleaned=cleaned,
                               light_events=light, note="  ".join(notes) or None)
+
+
+def _filter_state(rec, ks: KilosortResults, sorting_dir: Path):
+    """The session's median-spectrum figure, for this shank alone."""
+    from .plots import noise
+
+    _run, _trigger, probe, shank = _shank_dir_key(Path(sorting_dir))
+    number = int(probe[4:]) if probe else 0
+    measured = noise.shank_measurement(rec, ks, sorting_dir, probe=number,
+                                       shank=shank)
+    note = measured.get("pipeline_note")
+    missing = f" No pipeline destripe line: {note}." if note else ""
+    return noise.median_spectra(
+        [measured], panel_w=7.0, panel_h=4.6,
+        title=f"{label_from_path(sorting_dir)}: median spectrum across "
+              f"channels, per processing stage",
+        subtitle=f"{_windows_text(noise)}. {NOISE_STAGES_TEXT}{missing}")
+
+
+def _windows_text(noise) -> str:
+    return (f"1 s each at {', '.join(f'{int(f * 100)}%' for f in noise.WINDOW_FRACTIONS)} "
+            f"of the recording")
+
+
+#: What the noise figures' stages are, said once for the session figures
+#: and the per-shank filter_state.
+NOISE_STAGES_TEXT = (
+    "Stages: raw (channel medians removed); band-pass 0.5-10 kHz; "
+    "the shank's across-channel median removed (global CAR), then "
+    "band-passed; then each simultaneously sampled group's median "
+    "also removed (demux CAR), then band-passed; last, the sorting "
+    "pipeline's own destripe of the same seconds (ADC phase shift, "
+    "from sort v3 the ADC-group median, spatial high-pass), band-passed "
+    "likewise, where the sort kept it.")
 
 
 def _biggest_units(ks: KilosortResults, n: int) -> list[int]:
@@ -481,15 +566,8 @@ def _noise_detail(result: ReportResult, found, label: str, caveat: str) -> None:
             result.skipped[name] = reason
         return
     missing = f"   No measurement: {', '.join(failures)}" if failures else ""
-    windows = (f"1 s each at {', '.join(f'{int(f * 100)}%' for f in noise.WINDOW_FRACTIONS)} "
-               f"of the recording")
-    stages = ("Stages: raw (channel medians removed); band-pass 0.5-10 kHz; "
-              "the shank's across-channel median removed (global CAR), then "
-              "band-passed; then each simultaneously sampled group's median "
-              "also removed (demux CAR), then band-passed; last, the sorting "
-              "pipeline's own destripe of the same seconds (ADC phase shift, "
-              "from sort v3 the ADC-group median, spatial high-pass), band-passed "
-              "likewise, where the sort kept it.")
+    windows = _windows_text(noise)
+    stages = NOISE_STAGES_TEXT
     spec = [
         ("session_noise_depth_power", noise.depth_power_grid,
          "power by depth and frequency, per stage and shank",

@@ -38,7 +38,10 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
     use_lab_style()
 
     uids = [int(u) for u in ks.unit_ids]
-    amp = np.array([ks.unit_amplitude_uv[u] for u in uids])
+    amp = np.array([ks.unit_amplitude_uv[u] for u in uids], dtype=float)
+    # A unit with no measurable amplitude cannot sit on the log axis: drawn at
+    # 1 uV, below any real unit, rather than silently dropped.
+    amp = np.where(np.isfinite(amp) & (amp > 0), amp, 1.0)
     depth = np.array([ks.unit_depth_um[u] for u in uids])
     rate = np.array([v for v in
                      (ks.firing_rate(duration_s)[u] for u in uids)])
@@ -72,6 +75,9 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
 
     for ax in axes:
         ax.set_xlabel(AMP_LABEL)
+        # Log, because amplitudes span 20 to 1,000 uV and most units sat in
+        # the lowest tenth of a linear axis (Nick, 2026-11-15).
+        ax.set_xscale("log")
         despine(ax)
         if artifact_z_um is not None and np.isfinite(artifact_z_um):
             top = max(depth.max(), artifact_z_um)
@@ -90,15 +96,25 @@ def amp_depth_scatter(ks, duration_s: float | None = None,
     return fig
 
 
-def templates_grid(ks, unit_ids=None, n_channels: int = 8, n_cols: int = 6,
+def templates_grid(ks, unit_ids=None, n_channels: int = 32, n_cols: int = 6,
                    title: str | None = None, scale_uv: float | None = None):
-    """A small multiple per unit: the template on its best few channels.
+    """A small multiple per unit: the template on its nearest sites, each
+    waveform drawn where its site sits on the probe.
 
-    Channels are chosen around the peak and drawn at their true depth spacing,
-    so a unit whose template spreads over 200 um looks different from one
-    confined to two rows.
+    The ``n_channels`` sites nearest the peak site by physical distance (32 is
+    sixteen rows of two columns on NP2, 240 um of shank), each waveform at its
+    site's position across and along the shank, the way phy draws them. A unit
+    whose template spreads over 200 um then looks different from one confined
+    to two rows, and one centered on the left column from one on the right.
+
+    Each panel has its own vertical scale, the unit's largest excursion filling
+    about three rows, so a 40 uV unit is as legible as a 600 uV one; its
+    peak-to-peak amplitude is in its title. ``scale_uv`` fixes one scale for
+    every panel instead (microvolts per three rows).
     """
     import matplotlib.pyplot as plt
+
+    from .rawviews import _site_spacing
     use_lab_style()
 
     if unit_ids is None:
@@ -109,13 +125,19 @@ def templates_grid(ks, unit_ids=None, n_channels: int = 8, n_cols: int = 6,
 
     unw = ks.templates_unwhitened
     peak = ks.peak_channel
-    pos = ks.channel_positions
+    pos = np.asarray(ks.channel_positions, dtype=float)
     scale = ks.uv_per_bit or 1.0
     n_rows = int(np.ceil(len(unit_ids) / n_cols))
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(2.0 * n_cols, 2.2 * n_rows),
-                             squeeze=False)
     t_ms = np.arange(unw.shape[1]) / ks.fs * 1000.0
+    span_ms = float(t_ms[-1] - t_ms[0]) or 1.0
+    dx, dy = _site_spacing(pos)
+    x_scale = 0.85 * dx / span_ms                     # micrometres per ms
+    n_columns = max(1, np.unique(np.round(pos[:, 0], 3)).size)
+    site_rows = int(np.ceil(min(n_channels, len(pos)) / n_columns))
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols, squeeze=False,
+        figsize=(2.0 * n_cols, 0.8 + max(2.2, 0.21 * site_rows) * n_rows))
 
     for k, uid in enumerate(unit_ids):
         ax = axes[k // n_cols][k % n_cols]
@@ -123,34 +145,52 @@ def templates_grid(ks, unit_ids=None, n_channels: int = 8, n_cols: int = 6,
             ax.axis("off")
             continue
         pk = int(peak[uid])
-        # Nearest channels by physical distance, not by index: index order is a
+        # Nearest sites by physical distance, not by index: index order is a
         # wiring detail and jumps across columns on a multi-column probe.
         d = np.hypot(pos[:, 0] - pos[pk, 0], pos[:, 1] - pos[pk, 1])
-        chans = np.argsort(d)[:n_channels]
-        chans = chans[np.argsort(pos[chans, 1])]
-
+        chans = np.argsort(d, kind="stable")[:n_channels]
         wave = unw[uid][:, chans] * scale
-        step = scale_uv or (np.ptp(wave) * 0.6 or 1.0)
-        for j in range(len(chans)):
-            ax.plot(t_ms, wave[:, j] + j * step, lw=0.8, color="0.2")
-        ax.set_title(f"Unit {uid}", fontsize=8)
+        biggest = scale_uv or (float(np.abs(wave).max()) or 1.0)
+        y_scale = 3.0 * dy / biggest                  # micrometres per microvolt
+        for j, c in enumerate(chans):
+            ax.plot(pos[c, 0] + (t_ms - t_ms[0]) * x_scale,
+                    pos[c, 1] + wave[:, j] * y_scale, lw=0.7,
+                    color="crimson" if c == pk else "0.2")
+        ax.set_xlim(pos[chans, 0].min() - 0.15 * dx,
+                    pos[chans, 0].max() + 1.0 * dx)
+        ax.set_ylim(pos[chans, 1].min() - 3.2 * dy, pos[chans, 1].max() + 3.2 * dy)
+        # The amplitude only where microvolts are known: without a gain the
+        # grid is still worth drawing, in arbitrary units.
+        if ks.uv_per_bit:
+            amp = ks.unit_amplitude_uv.get(int(uid), float("nan"))
+            ax.set_title(f"Unit {uid}, {amp:.0f} µV", fontsize=8)
+        else:
+            ax.set_title(f"Unit {uid}", fontsize=8)
         ax.set_xticks([])
-        ax.set_yticks([])
-        for side in ("left", "bottom"):
-            ax.spines[side].set_visible(False)
+        ax.tick_params(labelsize=6)
+        ax.spines["bottom"].set_visible(False)
         despine(ax)
+        if k % n_cols == 0:
+            ax.set_ylabel(DEPTH_LABEL, fontsize=7)
 
     for k in range(len(unit_ids), n_rows * n_cols):
         axes[k // n_cols][k % n_cols].axis("off")
 
-    # One scale bar for the whole grid beats an unreadable axis on each panel.
-    axes[0][0].plot([t_ms[0], t_ms[0] + 1.0], [0, 0], lw=2, color="crimson",
-                    clip_on=False)
-    axes[0][0].text(t_ms[0], 0, " 1 ms", color="crimson", fontsize=7,
-                    va="top")
+    # Time is folded into x, so the x axis is not a duration: one time bar.
+    ax = axes[0][0]
+    x_lo, _x_hi = ax.get_xlim()
+    y_lo = ax.get_ylim()[0]
+    ax.plot([x_lo, x_lo + 1.0 * x_scale], [y_lo, y_lo], lw=2, color="0.15",
+            clip_on=False, solid_capstyle="butt")
+    ax.text(x_lo + 0.5 * x_scale, y_lo, "1 ms", fontsize=7, va="top",
+            ha="center", clip_on=False)
 
-    fig.suptitle(title or ks.title(f"Templates ({len(unit_ids)} units, "
-                                   f"{n_channels} channels each)"), fontsize=12)
+    scaling = (f"{scale_uv:g} µV per three rows" if scale_uv
+               else "each scaled to its own peak, peak site in red")
+    fig.suptitle(title or ks.title(
+        f"Templates of the {len(unit_ids)} units with the most spikes, "
+        f"{n_channels} nearest sites at their positions ({scaling})"),
+        fontsize=11)
     fig.tight_layout()
     return fig
 
