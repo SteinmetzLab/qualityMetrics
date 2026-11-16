@@ -562,17 +562,28 @@ def _session_figures(result: ReportResult, session_dir: Path, found,
     out_dir = result.out_dir
     if not found.shanks:
         reason = "; ".join(found.incomplete) or "no sorted shanks found"
+        result.skipped["session_drift_traces"] = reason
         result.skipped["session_raster_all_units"] = reason
         result.skipped["session_raster_passing"] = reason
         result.skipped["session_rms_across_shanks"] = reason
         return
 
-    label = f"{session_dir.parent.parent.name} {session_dir.parent.name}".strip()
+    session_root = session_dir.parent if session_dir.name == "sorting" else session_dir
+    label = f"{session_root.parent.parent.name} {session_root.parent.name}".strip()
+    session_label = f"{label} {session_root.name}".strip()
     # Named on the figure, not only in a log beside it.
     caveat = (f"   Unusable and left out: {'; '.join(found.incomplete)}"
               if found.incomplete else "")
     totals = sum(int(s.quality_metrics().get("n_units_total", 0))
                  for s in found.shanks)
+
+    _attempt(result, "session_drift_traces",
+             lambda: sessionplots.session_drift_traces(
+                 found.shanks,
+                 title=f"{session_label}: DREDGE displacement, every shank".strip(),
+                 subtitle=(f"{found.describe}. Each panel is one shank; colored "
+                           "lines are the depth-window estimates. Time and "
+                           f"displacement axes are shared across panels.{caveat}")))
 
     _attempt(result, "session_raster_all_units", lambda: sessionplots.session_raster(
         found.shanks,

@@ -107,6 +107,8 @@ SHANK_SECTIONS: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...] = (
 )
 
 SESSION_FIGURES: tuple[tuple[str, str, str], ...] = (
+    ("session_drift_traces", "DREDGE displacement, every shank",
+     "One panel per shank on shared axes; trace color is the depth window."),
     ("session_raster_all_units", "Every sorted unit",
      "Rates over the session for every unit the sorter produced."),
     ("session_raster_passing", "Units passing QC",

@@ -126,7 +126,8 @@ def test_a_page_without_templates_says_why_and_keeps_the_figure(tmp_path, ks, mo
 
 def test_the_session_page_links_each_shank_page_by_probe_and_shank(tmp_path):
     out = _folder(tmp_path, ["session_raster_passing.png",
-                             "session_raster_all_units.png"], name="qc_plots")
+                             "session_raster_all_units.png",
+                             "session_drift_traces.png"], name="qc_plots")
     for name in ("p1_g0_imec0_shank0", "p1_g0_imec1_shank3"):
         (out / name).mkdir()
         (out / name / "index.html").write_text("x", encoding="utf-8")
@@ -142,7 +143,8 @@ def test_the_session_page_links_each_shank_page_by_probe_and_shank(tmp_path):
     assert "No figures" in text                              # shank2: named, absent
     assert "_previous" not in text
     order = [m.group(1) for m in re.finditer(r'<img src="([^"]+)\.png"', text)]
-    assert order == ["session_raster_all_units", "session_raster_passing"]
+    assert order == ["session_drift_traces", "session_raster_all_units",
+                     "session_raster_passing"]
 
 
 def test_build_report_writes_the_shank_page(sorter_output, tmp_path):
@@ -314,6 +316,7 @@ def test_report_write_page_with_kept_reasons_reads_them(tmp_path, ks):
 def test_the_session_page_names_missing_session_figures(tmp_path):
     out = _folder(tmp_path, ["session_raster_all_units.png"], name="qc_plots")
     text = pages.write_session_page(out, title="S").read_text(encoding="utf-8")
+    assert "<td>session_drift_traces</td><td>no reason recorded</td>" in text
     assert "<td>session_raster_passing</td><td>no reason recorded</td>" in text
     assert "<td>session_raster_all_units</td>" not in text
 

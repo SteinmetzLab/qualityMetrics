@@ -265,6 +265,56 @@ class SessionShank:
         return {int(unit["unit_id"]) for unit in units if unit.get(criterion)}
 
 
+@dataclass(frozen=True)
+class DredgeMotion:
+    """The motion estimate SortingManager saved for one shank."""
+
+    temporal_s: np.ndarray
+    spatial_um: np.ndarray
+    displacement_um: np.ndarray
+
+
+def load_motion(shank: SessionShank) -> DredgeMotion:
+    """Read and validate one shank's ``motion.npz``.
+
+    SortingManager writes displacement as time by depth. Accept depth by time
+    as well, because SpikeInterface's in-memory object has changed orientation
+    between releases and an older archive should still be drawable. A damaged
+    file is refused with its reason instead of producing a mislabeled panel.
+    """
+    path = shank.directory / "motion.npz"
+    if not path.exists():
+        raise FileNotFoundError("No motion.npz")
+    with np.load(path, allow_pickle=False) as saved:
+        required = {"displacement", "temporal_bins_s", "spatial_bins_um"}
+        missing = required - set(saved.files)
+        if missing:
+            raise ValueError(f"motion.npz lacks {', '.join(sorted(missing))}")
+        displacement = np.asarray(saved["displacement"], dtype=float)
+        temporal = np.asarray(saved["temporal_bins_s"], dtype=float).ravel()
+        spatial = np.asarray(saved["spatial_bins_um"], dtype=float).ravel()
+
+    if displacement.ndim == 1 and spatial.size == 1:
+        displacement = displacement[:, None]
+    if displacement.ndim != 2:
+        raise ValueError("motion.npz displacement is not a two-dimensional array")
+    expected = (temporal.size, spatial.size)
+    if displacement.shape != expected and displacement.shape == expected[::-1]:
+        displacement = displacement.T
+    if displacement.shape != expected:
+        raise ValueError(
+            "motion.npz displacement shape does not match its time and depth bins")
+    if not temporal.size or not spatial.size:
+        raise ValueError("motion.npz has no time or depth bins")
+    if not (np.isfinite(temporal).all() and np.isfinite(spatial).all()
+            and np.isfinite(displacement).all()):
+        raise ValueError("motion.npz contains a non-finite value")
+    if temporal.size > 1 and np.any(np.diff(temporal) <= 0):
+        raise ValueError("motion.npz time bins are not strictly increasing")
+    return DredgeMotion(temporal_s=temporal, spatial_um=spatial,
+                        displacement_um=displacement)
+
+
 @dataclass
 class SessionSorts:
     """What was found under a session, including what was not usable."""
@@ -801,6 +851,108 @@ def _fit_rows(counts: np.ndarray, target: int) -> np.ndarray:
     return counts[np.linspace(0, n - 1, target).round().astype(int)]
 
 
+def session_drift_traces(shanks: list[SessionShank], *, title: str = "",
+                         subtitle: str = ""):
+    """DREDGE displacement traces for every shank on comparable axes.
+
+    Rows are probes (or run and probe, when a session has several runs), and
+    columns are shanks. Every panel shares its time and displacement limits;
+    otherwise a noisy 60 um estimate and a stable 3 um estimate can look the
+    same. Trace color is the center of DREDGE's depth window, on one scale for
+    the whole session. A missing or damaged estimate is named in its panel.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    from matplotlib.ticker import MaxNLocator
+
+    use_lab_style()
+    if not shanks:
+        raise ValueError("no shanks to draw")
+
+    estimates, problems = {}, {}
+    for shank in shanks:
+        try:
+            estimates[shank.label] = load_motion(shank)
+        except Exception as exc:  # noqa: BLE001 - name one bad shank, draw the rest
+            problems[shank.label] = str(exc) or type(exc).__name__
+    if not estimates:
+        detail = "; ".join(f"{name}: {why}" for name, why in problems.items())
+        raise ValueError(f"no shank has a readable motion.npz ({detail})")
+
+    probe_slots = sorted({shank.color_probe for shank in shanks})
+    shank_numbers = sorted({shank.shank for shank in shanks})
+    by_position = {(shank.color_probe, shank.shank): shank for shank in shanks}
+    nrows, ncols = len(probe_slots), len(shank_numbers)
+    width = max(FIGURE_WIDTH_IN, 2.75 * ncols + 1.5)
+    height = max(4.8, 1.5 * nrows + 1.8)
+    figure, grid = plt.subplots(nrows, ncols, squeeze=False, sharex=True,
+                                sharey=True, figsize=(width, height))
+
+    depths = np.concatenate([motion.spatial_um for motion in estimates.values()])
+    depth_low, depth_high = float(depths.min()), float(depths.max())
+    # Normalize needs a nonzero span for a rigid, one-window estimate.
+    norm = Normalize(depth_low, depth_high if depth_high > depth_low else depth_low + 1)
+    cmap = plt.get_cmap("viridis")
+    excursion = max(float(np.abs(motion.displacement_um).max())
+                     for motion in estimates.values())
+    excursion = max(excursion, 1.0)
+    y_low, y_high, _step = _round_axis(-excursion, excursion, max_intervals=6)
+    duration_s = max(
+        max((shank.duration_s for shank in shanks), default=0.0),
+        max(float(motion.temporal_s[-1]) for motion in estimates.values()),
+    )
+
+    row_names = {}
+    for shank in shanks:
+        row_names.setdefault(shank.color_probe, shank.probe_name)
+    for row, probe_slot in enumerate(probe_slots):
+        for column, shank_number in enumerate(shank_numbers):
+            axis = grid[row, column]
+            axis.axhline(0.0, color=GRID, linewidth=0.8, zorder=0)
+            axis.grid(axis="y", color=GRID, linewidth=0.5, alpha=0.45)
+            axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+            despine(axis)
+            shank = by_position.get((probe_slot, shank_number))
+            if shank is None:
+                axis.set_facecolor("#f7f7f7")
+                axis.text(0.5, 0.5, "No sorted shank", transform=axis.transAxes,
+                          ha="center", va="center", fontsize=8, color=MUTED)
+                continue
+            motion = estimates.get(shank.label)
+            if motion is None:
+                axis.set_facecolor("#f7f7f7")
+                axis.text(0.5, 0.5, problems[shank.label], transform=axis.transAxes,
+                          ha="center", va="center", fontsize=8, color=MUTED,
+                          wrap=True)
+                continue
+            for depth, trace in zip(motion.spatial_um,
+                                    motion.displacement_um.T, strict=True):
+                axis.plot(motion.temporal_s / 60.0, trace, color=cmap(norm(depth)),
+                          linewidth=0.9, alpha=0.9)
+
+        grid[row, 0].text(-0.34, 0.5, row_names[probe_slot],
+                          transform=grid[row, 0].transAxes, ha="right", va="center",
+                          fontsize=9, color=INK)
+    for column, shank_number in enumerate(shank_numbers):
+        grid[0, column].set_title(f"shank {shank_number}", fontsize=10)
+
+    grid[0, 0].set_xlim(0.0, duration_s / 60.0)
+    grid[0, 0].set_ylim(y_low, y_high)
+    figure.supxlabel("Time in the recording (minutes)", fontsize=11, y=0.025)
+    figure.supylabel("DREDGE displacement (µm)", fontsize=11, x=0.012)
+    # A fixed outer axes keeps the bar from covering the right-hand shank
+    # panels in a tall, many-probe session (28 shanks exposed that overlap).
+    color_axis = figure.add_axes([0.925, 0.17, 0.018, 0.65])
+    colorbar = figure.colorbar(ScalarMappable(norm=norm, cmap=cmap),
+                               cax=color_axis)
+    colorbar.set_label("Depth-window center (µm)")
+    _caption(figure, title, subtitle)
+    figure.subplots_adjust(left=0.13, right=0.90, bottom=0.08, top=0.91,
+                           hspace=0.22, wspace=0.10)
+    return figure
+
+
 def session_raster(shanks: list[SessionShank], *, duration_s: float | None = None,
                    criterion: str | None = None, bin_s: float = 1.0,
                    max_rows: int = 1400, title: str = "", subtitle: str = ""):
@@ -917,6 +1069,7 @@ def noise_table(measurements: list[dict], path: str | Path) -> str:
     return str(path)
 
 
-__all__ = ["SessionShank", "SessionSorts", "find_session_shanks", "channel_rms",
-           "rms_across_shanks", "session_raster", "unit_rates", "noise_table",
-           "color_for", "PALETTE", "save"]
+__all__ = ["DredgeMotion", "SessionShank", "SessionSorts", "find_session_shanks",
+           "load_motion", "channel_rms", "rms_across_shanks", "session_drift_traces",
+           "session_raster", "unit_rates", "noise_table", "color_for", "PALETTE",
+           "save"]
