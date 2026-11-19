@@ -44,7 +44,7 @@ def depth_correlation(ks, depth_bin_um: float = 40.0, time_bin_s: float = 0.05,
     the edge of that block. This is the closest thing in the package to a
     functional anatomy read, and it needs no histology.
 
-    Depth bins with almost no spikes are excluded rather than correlated: the
+    Depth bins with almost no spikes are shown grey rather than correlated: the
     correlation of two nearly empty bins is noise, and leaving them in scatters
     bright pixels across the figure that look like structure.
     """
@@ -58,19 +58,27 @@ def depth_correlation(ks, depth_bin_um: float = 40.0, time_bin_s: float = 0.05,
     if keep.sum() < 3:
         raise ValueError("too few occupied depth bins to correlate")
 
-    kept = counts[keep]
-    corr = np.corrcoef(kept)
-    centres = (depth_edges[:-1] + depth_edges[1:]) / 2
-    kept_centres = centres[keep]
+    # Masked rows and columns keep each pixel at its own depth.
+    corr = np.full((keep.size, keep.size), np.nan)
+    corr[np.ix_(keep, keep)] = np.corrcoef(counts[keep])
+    shown = np.ma.masked_invalid(corr)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("0.75")
 
     fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(corr, aspect="auto", origin="lower", cmap="viridis",
-                   extent=[kept_centres.min(), kept_centres.max(),
-                           kept_centres.min(), kept_centres.max()],
-                   vmin=np.percentile(corr, 2), vmax=np.percentile(corr, 98),
+    im = ax.imshow(shown, aspect="auto", origin="lower", cmap=cmap,
+                   extent=[depth_edges[0], depth_edges[-1],
+                           depth_edges[0], depth_edges[-1]],
+                   vmin=np.percentile(shown.compressed(), 2),
+                   vmax=np.percentile(shown.compressed(), 98),
                    interpolation="nearest")
     cbar = fig.colorbar(im, ax=ax, pad=0.02)
     cbar.set_label("Correlation of firing rate (r)")
+    cbar.ax.plot([0.5], [-0.04], marker="s", markersize=9, color="0.75",
+                 markeredgecolor="0.4", transform=cbar.ax.transAxes,
+                 clip_on=False)
+    cbar.ax.text(2.2, -0.04, "Too few spikes", transform=cbar.ax.transAxes,
+                 va="center", ha="left", fontsize=8)
     ax.set_xlabel(DEPTH_LABEL)
     ax.set_ylabel(DEPTH_LABEL)
     despine(ax)
